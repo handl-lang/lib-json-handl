@@ -1,0 +1,10 @@
+[package]
+name = "handl-lib-json-handl"
+version = "0.1.0"
+edition = "2024"
+description = "json-handl: JSON parser/serializer written in handl itself — the pure-.hnl sibling of lib-json (ADR-0128 split)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/handl-lang/lib-json-handl"
+
+# Const-only: pure handl (the tree is read from disk at runtime).
+[dependencies]

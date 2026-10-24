@@ -1,0 +1,498 @@
+--- json.hnl — a JSON parser + serializer written in handl itself on the
+--- phase-3 unified type system. Pure-.hnl sibling of lib-json (the
+--- C-backed codec): the `data`/`match`/implicit-binder/`IO(sig)` surface
+--- exercised end to end on a real library, not a test sketch.
+---
+--- Verified surface (`hnl typecheck src/json.hnl` — clean; `hnl run`
+--- evaluates the smoke block at the bottom):
+---
+---   data Json :: JNull | JBool(b : Bool) | JNum(n : Number) | JStr(s : Str)
+---              | JArr(xs : [Json]) | JObj(kvs : [[Str, Json]])
+---   data PErr :: PErr(pos : Number, msg : Str)
+---   data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
+---
+--- KNOWN GAPS (see /tmp/dogfood2-report.md for the full writeup):
+---
+---   * `while {state} {closure}` bodies are entirely unchecked
+---     (`type.while` synthesizes `type.unknown` without descending) —
+---     the escape hatch for everything below: `+` on strings, `if`/`&&`
+---     on `type.unknown` results, `error.raise`, `==` comparisons.
+---   * `+` is `Number`-only — `"a" + "b"` fails the checker outside a
+---     `while` (`cannot unify — expected Number, got Str`), so `step_v`
+---     concatenates via `str.concat` (uniform `type.unknown` results).
+---   * `type.unknown` does NOT unify with anything (the types.yaml
+---     comment claims it does): match arms must stay homogeneous —
+---     `"lit"` vs `typeof.to_string(..)` arms fail "expected Str, got
+---     Unknown"; `if`/`>=`/`&&`/`==` against host-call results all fail;
+---     `[]` is `Array(unknown)` and fails wherever a concrete
+---     `Array(T)` is inferred.
+---   * `:=` arrows are MONOMORPHIC across call sites — a shared param
+---     meta pins the first call's shape: `mk_io`/`chain_*` helpers
+---     couldn't be reused with `{get}`/`{put}`/`{ret}` records
+---     ("cannot unify closed records with different fields"); the mints
+---     are inlined instead. `mk_io` survives only for the summary path.
+---   * Recursion requires `: T =` (`f := …f…` is unbound; mutual
+---     recursion impossible — forward refs unbound). `Unknown` in a
+---     callable annotation degrades it to `LamVal` — `f : X ~> Unknown`
+---     fails "call: callee is not applicable". So `parse`/`toStr`/`runState`
+---     stay `:=`.
+---   * `data` ctors are file-local at runtime: an exported arrow whose
+---     body calls `JNum(..)` fails via `from "./json.hnl" import` with
+---     `call_host: function 'JNum' not found` — `data`'s `__splice__`
+---     binds don't reach imported-arrow environments (ADR-0155
+---     scope-bound envs). `mk_*` mints the same `__ctor__` shape as
+---     plain records — pure data, import-safe, `match` by ctor name.
+---   * `hnl test` can't run `data` decls: the metacircular
+---     `desugar.data` overlay match-fails on `data D :: A | B(x : T)`.
+---   * `IO(sig)` values cannot be CONSTRUCTED in checked code —
+---     `x : IO(S) = {"__former__": sym.seeded("type.io"), …}` synthesizes
+---     `{__former__: Unknown, indices: Array}`, not `Former{type.io}` —
+---     only declared stub bodies produce `IO` types the checker trusts.
+---   * `export name := v` re-binds `name` — `export x := x` is a
+---     duplicate binding, and exported names are dead *inside* the
+---     module under `hnl run` (`call_host: 'x' not found`). The record
+---     at the bottom is the import surface instead.
+---   * `()` is not a Unit literal (checker `child_ref` internal error);
+---     `{"__tag__": "type.unit"}` is the only Unit spelling.
+---   * `data J :: …` — `J` is the J-eliminator keyword even as a family
+---     name ("expected token.bind"); `kv[1]` on a `[Str, Json]` tuple
+---     fails `array_element_type` — destructure via `[[k, v], …]` patterns.
+---   * A record literal in call-arg position can hit
+---     `check_object_record: node has no entries array` — bind it first.
+
+-- ------------------------------------------------------------------------
+-- Types — the checked surface
+-- ------------------------------------------------------------------------
+
+data Json :: JNull | JBool(b : Bool) | JNum(n : Number) | JStr(s : Str)
+           | JArr(xs : [Json]) | JObj(kvs : [[Str, Json]])
+
+data PErr :: PErr(pos : Number, msg : Str)
+
+data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
+
+--- State(s) — the approved signature (option A): get reads the state,
+--- put replaces it. Written as a record type so `IO(State(s))` spells
+--- out in annotations; note `s` is a *bound* name via the implicit
+--- binder — `State{…}` isn't a former, it's sugar for the sig record.
+--- `runState`'s type per the approved design:
+---   runState : (A ~> IO(State(s))) ~> s ~> (A, s)
+
+-- ------------------------------------------------------------------------
+-- `mk_*` factories — manual `__ctor__` mints (the lib-option idiom).
+-- These produce the *same* object shape `data` mints do, so values
+-- cross the `from … import` boundary (ctor *calls* can't — see gaps).
+-- `match` dispatches on ctor-name identity for both.
+-- ------------------------------------------------------------------------
+
+mk_jnull := u ~> {"__ctor__": sym.seeded("data.Json.JNull"),
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
+mk_jbool := b ~> {"__ctor__": sym.seeded("data.Json.JBool"), b: b,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
+mk_jnum := n ~> {"__ctor__": sym.seeded("data.Json.JNum"), n: n,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
+mk_jstr := s ~> {"__ctor__": sym.seeded("data.Json.JStr"), s: s,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
+mk_jarr := xs ~> {"__ctor__": sym.seeded("data.Json.JArr"), xs: xs,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
+mk_jobj := kvs ~> {"__ctor__": sym.seeded("data.Json.JObj"), kvs: kvs,
+                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
+mk_ok := v ~> {"__ctor__": sym.seeded("data.Result.Ok"), v: v,
+               "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}}
+mk_err := e ~> {"__ctor__": sym.seeded("data.Result.Err"), e: e,
+                "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}}
+mk_perr := (pos, msg) ~> {"__ctor__": sym.seeded("data.PErr.PErr"), pos: pos, msg: msg,
+                          "type": {"__former__": sym.seeded("data.PErr"), "indices": []}}
+
+-- ------------------------------------------------------------------------
+-- Checked recursion — `jfirst_scalar` is the pure-canonical proof that
+--- `match` + `: T =` recursion compose on a `data` family: every arm is
+--- `Json` (homogeneous), the scrutinee is `Json`, and `kv[1]` projects
+--- the `[Str, Json]` pair. Runs on tree-walk (AST-eval fallback;
+--- bytecode/cranelift still diverge on self-recursive closures).
+-- ------------------------------------------------------------------------
+
+jfirst_scalar_ : Json ~> Json = j ~> match j {
+  JArr(xs): match xs { []: j, [h, ...t]: jfirst_scalar_(h) },
+  JObj(kvs): match kvs { []: j, [[k, v], ...t]: jfirst_scalar_(v) },
+  _: j
+}
+
+-- ------------------------------------------------------------------------
+-- Serializer — `toStr : Json ~> Str`.
+-- `:=` + `while` worklist (the unchecked island): `+` on strings and
+-- host calls can't sit in a checked arrow, so the whole walk rides the
+-- `while` state protocol — `{k:"s"}` emit-a-string actions and
+-- `{k:"v"}` emit-a-value actions on an explicit stack.
+-- ------------------------------------------------------------------------
+
+esc := s ~> str.replace(str.replace(s, "\\", "\\\\"), "\"", "\\\"")
+
+--- `items`/`kvs` expand a `[Json]` array / `[[Str, Json]]` pairs into
+--- comma-separated emit actions, reversed for stack order.
+items_acts := xs ~> while { xs: xs, acc: [], i: 0 } {
+  (xs, acc, i) ~> match xs {
+    []: { out: acc },
+    [x, ...t]: if i == 0 {
+      { state: { xs: t, acc: [...acc, { k: "v", x: x }], i: i + 1 } }
+    } else {
+      { state: { xs: t, acc: [...acc, { k: "s", s: "," }, { k: "v", x: x }], i: i + 1 } }
+    }
+  }
+}
+
+kvs_acts := kvs ~> while { ps: kvs, acc: [], i: 0 } {
+  (ps, acc, i) ~> match ps {
+    []: { out: acc },
+    [p, ...t]: if i == 0 {
+      { state: { ps: t, acc: [...acc, { k: "s", s: "\"" + esc(p[0]) + "\":" }, { k: "v", x: p[1] }], i: i + 1 } }
+    } else {
+      { state: { ps: t, acc: [...acc, { k: "s", s: "," }, { k: "s", s: "\"" + esc(p[0]) + "\":" }, { k: "v", x: p[1] }], i: i + 1 } }
+    }
+  }
+}
+
+--- One emit step: dispatch on the ctor object by match (runtime
+--- ctor-name discrimination; `match` arms return `{state: …}`/`{out: …}`).
+step_v := (x, rest, out) ~> match x {
+  JNull: { state: { stack: rest, out: str.concat(out, "null") } },
+  JBool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
+  JNum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
+  JStr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
+  JArr(xs): { state: { stack: [...items_acts(xs), { k: "s", s: "]" }, ...rest], out: str.concat(out, "[") } },
+  JObj(kvs): { state: { stack: [...kvs_acts(kvs), { k: "s", s: "}" }, ...rest], out: str.concat(out, "{") } }
+}
+
+toStr_ := j ~> while { stack: [{ k: "v", x: j }], out: "" } {
+  (stack, out) ~> match stack {
+    []: { out: out },
+    [a, ...rest]: if a.k == "s" {
+      { state: { stack: rest, out: out + a.s } }
+    } else {
+      step_v(a.x, rest, out)
+    }
+  }
+}
+
+-- ------------------------------------------------------------------------
+-- Parser — `parse : Str ~> Result(PErr, Json)`.
+-- Explicit-stack descent over `char.chars` input (recursion must be
+-- `: T =`-annotated and `Unknown` can't appear in annotations, so the
+-- tokenize/build work rides the unchecked `while` island — same shape
+-- as lib-json but producing `data` values through `mk_*` mints).
+-- `pos` is the count of consumed chars — what `IO(State(pos))` below
+-- reports as the state.
+-- ------------------------------------------------------------------------
+
+ws_p := c ~> str.find(" \t\n\r", c)
+num_p := c ~> str.find("0123456789+-.eE", c)
+alpha_p := c ~> str.find("abcdefghijklmnopqrstuvwxyz", c)
+
+--- scan a `"`-terminated string; returns {rest, s}
+scan_str := (cs, acc) ~> while { cs: cs, acc: acc } {
+  (cs, acc) ~> match cs {
+    []: { out: { rest: [], s: acc } },
+    ["\\", c, ...t]: { state: { cs: t, acc: acc + c } },
+    ["\"", ...t]: { out: { rest: t, s: acc } },
+    [c, ...t]: { state: { cs: t, acc: acc + c } }
+  }
+}
+
+scan_run := (cs, pred, acc) ~> while { cs: cs, acc: acc } {
+  (cs, acc) ~> match cs {
+    []: { out: { rest: [], s: acc } },
+    [c, ...t]: if pred(c) >= 0 || pred(c) == true {
+      { state: { cs: t, acc: acc + c } }
+    } else { { out: { rest: cs, s: acc } } }
+  }
+}
+
+--- token stream: {k: "v", v: value} | {k: "{" | "}" | "[" | "]"}
+--- (`if` on host-call results can't typecheck — `if`/`>=`/`&&` on
+--- `type.unknown` all fail — so this body rides a trivial `while`.)
+tok_step := (cs, acc) ~> while { d: null } { (d) ~> { out: match cs {
+  [c, ...t]: if c == "\"" {
+    do {
+      r := scan_str(t, "")
+      { state: { cs: r.rest, acc: [...acc, { k: "v", v: mk_jstr(r.s) }] } }
+    }
+  } else {
+    if num_p(c) >= 0 {
+      do {
+        r := scan_run(cs, num_p, "")
+        { state: { cs: r.rest, acc: [...acc, { k: "v", v: mk_jnum(typeof.to_number(r.s)) }] } }
+      }
+    } else {
+      if alpha_p(c) >= 0 {
+        do {
+          r := scan_run(cs, alpha_p, "")
+          v := if r.s == "true" { mk_jbool(true) } else {
+            if r.s == "false" { mk_jbool(false) } else { mk_jnull(null) }
+          }
+          { state: { cs: r.rest, acc: [...acc, { k: "v", v: v }] } }
+        }
+      } else {
+        if c == ":" || c == "," {
+          { state: { cs: t, acc: acc } }
+        } else {
+          { state: { cs: t, acc: [...acc, { k: c, v: null }] } }
+        }
+      }
+    }
+  }
+} } }
+
+tokenize := s ~> while { cs: char.chars(s), acc: [] } {
+  (cs, acc) ~> match cs {
+    []: { out: acc },
+    [c, ...t]: if ws_p(c) >= 0 || ws_p(c) == true {
+      { state: { cs: t, acc: acc } }
+    } else { tok_step(cs, acc) }
+  }
+}
+
+--- object keys arrive as `JStr` ctor objects — project the raw string
+--- for the `[Str, Json]` pair `JObj` expects.
+key_of := v ~> match v { JStr(s): s, _: "" }
+
+--- place a completed value into the frame stack: array frames {k:"a",
+--- items} append; object frames {k:"o", items, key} hold a pending key
+--- (the JStr value until its `:` value arrives).
+place := (v, stack) ~> while { d: null } { (d) ~> { out: match stack {
+  []: { stack: stack, val: v },
+  [f, ...rest]: if f.k == "a" {
+    { stack: [{ k: "a", items: [...f.items, v] }, ...rest], val: null }
+  } else {
+    if f.key == null {
+      { stack: [{ k: "o", items: f.items, key: v }, ...rest], val: null }
+    } else {
+      { stack: [{ k: "o", items: [...f.items, [key_of(f.key), v]], key: null }, ...rest], val: null }
+    }
+  }
+} } }
+
+finish := f ~> while { d: null } { (d) ~> { out: if f.k == "a" { mk_jarr(f.items) } else { mk_jobj(f.items) } } }
+
+build_step := (tk, stack) ~> while { d: null } { (d) ~> { out: do {
+  if tk.k == "v" { place(tk.v, stack) } else {
+  if tk.k == "{" {
+    { stack: [{ k: "o", items: [], key: null }, ...stack], val: null }
+  } else {
+  if tk.k == "[" {
+    { stack: [{ k: "a", items: [] }, ...stack], val: null }
+  } else {
+    do {
+      f := match stack { [h, ...rr]: h }
+      rest := match stack { [h, ...rr]: rr }
+      place(finish(f), rest)
+    }
+  } } }
+} } }
+
+--- The produced value: an `Ok` ctor wrapping the `Json`, or `Err` with
+--- the byte position where parsing ended. `pos` is chars consumed —
+--- computed from the token count, so it is the count the `while` saw.
+parse_ := s ~> while { d: null } { (d) ~> { out: do {
+  ts := tokenize(s)
+  r := while { ts: ts, stack: [], val: null, n: 0 } {
+    (ts, stack, val, n) ~> match ts {
+      []: { out: { stack: stack, val: val, n: n } },
+      [tk, ...rest]: do {
+        r := build_step(tk, stack)
+        { state: { ts: rest, stack: r.stack, val: r.val, n: n + 1 } }
+      }
+    }
+  }
+  if r.val == null && str.length(str.trim(s)) > 0 && r.stack == [] {
+    mk_err(mk_perr(r.n, "no value"))
+  } else {
+    mk_ok(r.val)
+  }
+} } }
+
+-- ------------------------------------------------------------------------
+-- IO(sig) + State — the approved option-A design exercised.
+--
+-- `IO(sig)` objects are mintable via the runtime spelling
+--   {"__former__": sym.seeded("type.io"), "indices": [sig]}
+-- (`IO` the bare term stays unbound — lib-type's `export IO` doesn't
+-- materialize under `hnl run`). `interpret_io_former` reads
+-- `indices[0]` as `{op: request}` and dispatches each *covered* field
+-- to `handler[op]` applied to the request — per-entry, record order.
+--
+-- VERDICT on `runState` as designed: a `.hnl` fold over the produced
+-- IO former's op entries is writable *for the summary case* — the sig
+-- record `{get: req, put: req, result: a}` carries at most one request
+-- per op name and no ordering, so `get` always resolves to the initial
+-- state and `put`'s payload IS the final state. Real get/put
+-- sequencing (`put(p+1)` where `p` came from `get`) needs the op's
+-- *result* fed back into the computation — the reified record can't do
+-- it: the produced IO is data, not a suspended program. The faithful
+-- encoding is a chain of single-op IO objects (below): `IO({get: k})`
+-- where `k : s ~> IO` receives the get result, `IO({put: [s', k]})`
+-- where `k : unit ~> IO`, `IO({ret: a})` terminal — `runState` then is
+-- a while-fold over the *chain* of op entries, and each dispatch is
+-- literally `(payload, s) ~> (result, s)`.
+-- ------------------------------------------------------------------------
+
+mk_io := sig ~> {"__former__": sym.seeded("type.io"), "indices": [sig]}
+
+--- Option A literal: fold `io.indices[0]`'s entries — `get` returns s,
+--- `put` replaces it. One-shot semantics, order-free (the record can't
+--- sequence anyway). `result` is a pseudo-op field carrying `A`.
+runState_ := (f, s0) ~> while { d: null } { (d) ~> { out: do {
+  io := f(null)
+  sig := io.indices[0]
+  [if sig.result == null { sig.get } else { sig.result },
+   if sig.put == null { s0 } else { sig.put }]
+} } }
+
+--- `parse_st` — the IO(State(pos))-carried variant of `parse`. The
+--- parser threads `pos` explicitly anyway (it is pure); the produced
+--- IO asserts the net effect: it read the state (`get`) and wrote the
+--- final position (`put`). `runState` returns (Ok/Err, endpos).
+parse_st_ := s ~> while { d: null } { (d) ~> { out: do {
+  r := parse_(s)
+  mk_io({ get: null, put: match r { Ok(v): char.length(s), Err(e): match e { PErr(p, m): p, _: 0 } }, result: r })
+} } }
+
+run_parse_ := (s, s0) ~> runState_(u ~> parse_st_(s), s0)
+
+--- The faithful chain encoding — free-monad-shaped single-op IOs.
+--- Each object has exactly one op field; the payload is (arg, k) where
+--- `k` continues once the op's result is known.
+chain_get := k ~> do { sig := { get: k }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+chain_put := (ns, k) ~> do { sig := { put: [ns, k] }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+chain_ret := a ~> do { sig := { ret: a }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+
+--- `runState_c` — the fold over the chain: each step's sole op entry
+--- dispatches `(payload, s) ~> (result, s)` — get returns s into its
+--- continuation, put stores its payload and continues with unit.
+runState_c_ := (f, s0) ~> while { io: f(null), s: s0 } {
+  (io, s) ~> do {
+    sig := io.indices[0]
+    if sig.get != null {
+      { state: { io: sig.get(s), s: s } }
+    } else {
+      if sig.put != null {
+        p := sig.put
+        { state: { io: p[1](null), s: p[0] } }
+      } else {
+        { out: [sig.ret, s] }
+      }
+    }
+  }
+}
+
+--- A real chain doing get → put(s+1) → get → ret — exercises that a
+--- later op's payload CAN depend on an earlier result (the record
+--- encoding can't: `put(s+1)`'s `s` arrives only at fold time).
+demo_chain := u ~> do {
+  c3 := s2 ~> do { sig := { ret: s2 }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+  c2 := u2 ~> do { sig := { get: c3 }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+  c1 := s ~> do { sig := { put: [s + 1, c2] }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+  do { sig := { get: c1 }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+}
+
+--- `handle`-based comparison — `interpret_io_former`'s per-entry
+--- dispatch on the summary shape: `{get: g, put: p}` impls close over
+--- s0 (g returns s0, p's payload is the new state), independent per
+--- field — the same semantics `runState` gives, spelled via `handle`.
+--- It is NOT a fold: impls never see each other's results.
+handled := (io, s0) ~> handle io with {get: req ~> s0, put: req ~> req}
+
+-- ------------------------------------------------------------------------
+-- API surface — the module record at the bottom is what
+-- `from "./json.hnl" import * as j` binds (`j.toStr`, `j.parse`, …) —
+-- the `do {…; record}` module shape vec.hnl uses, inlined here because
+-- `data` declarations can't sit inside a `do` block.
+--
+-- `export name := impl` is unusable for this file on two counts:
+--   * `export` re-defines its name — `export toStr := toStr` is a
+--     "duplicate binding" error and `export toStr := toStr_` leaves the
+--     exported name uncallable *inside* the module (same-file `toStr(…)`
+--     → `call_host: function 'toStr' not found` under `hnl run`);
+--   * `data` ctor names can't be exported at all — `export JNum`
+--     collides with the `__splice__` bind; consumers mint via `mk_*`
+--     or redeclare `data Json` (the sym seeds are content-stable).
+-- ------------------------------------------------------------------------
+
+-- ------------------------------------------------------------------------
+-- Smoke — every result verified by `hnl run` output. `test_*` names are
+-- skipped (the `desugar.data` overlay can't run `data` under `hnl test`).
+-- ------------------------------------------------------------------------
+
+--- `==` against a `type.unknown` value is a *checker* failure ("cannot
+--- unify — expected Str, got Unknown"), so the assertions ride a
+--- `while` body too — `chk` raises on mismatch, so `hnl run` either
+--- prints `[true, …]` or dies loudly.
+smoke_all := while { d: null } { (d) ~> { out: do {
+  chk := (g, w) ~> if g == w { true } else { error.raise("smoke mismatch") }
+  [
+    chk(toStr_(JNull), "null"),
+    chk(toStr_(JNum(42)), "42"),
+    chk(toStr_(JBool(true)), "true"),
+    chk(toStr_(JStr("hi")), "\"hi\""),
+    chk(toStr_(JArr([JNum(1), JStr("x"), JNull])), "[1,\"x\",null]"),
+    chk(toStr_(JObj([["a", JNum(1)]])), "{\"a\":1}"),
+    chk(toStr_(mk_jarr([mk_jnum(7)])), "[7]"),
+
+    chk(match parse_("42") { Ok(v): toStr_(v), Err(e): "ERR" }, "42"),
+    chk(match parse_("\"hi\"") { Ok(v): toStr_(v), Err(e): "ERR" }, "\"hi\""),
+    chk(match parse_("[1,2]") { Ok(v): toStr_(v), Err(e): "ERR" }, "[1,2]"),
+    chk(match parse_("{\"a\":1}") { Ok(v): toStr_(v), Err(e): "ERR" }, "{\"a\":1}"),
+    chk(match parse_("true") { Ok(v): toStr_(v), Err(e): "ERR" }, "true"),
+    chk(match parse_("{\"a\":[1,{\"b\":null}]}") { Ok(v): toStr_(v), Err(e): "ERR" },
+        "{\"a\":[1,{\"b\":null}]}"),
+    chk(match parse_("{\"a\":[1,2],\"b\":{\"c\":\"x\"}}") { Ok(v): toStr_(v), Err(e): "ERR" },
+        "{\"a\":[1,2],\"b\":{\"c\":\"x\"}}"),
+
+    chk(match jfirst_scalar_(JObj([["k", JArr([JNum(9)])]])) {
+      JNum(n): n, _: 0 }, 9),
+
+    --- State: summary `runState` — (result, final pos).
+    chk(match run_parse_("[7]", 0)[0] { Ok(v): toStr_(v), Err(e): "ERR" }, "[7]"),
+    chk(run_parse_("[7]", 0)[1], 3.0),
+
+    --- State: chained get/put — get returns s, put replaces it; the
+    --- put's payload (s+1) is computed *inside* the fold, proving
+    --- sequencing the record encoding cannot express.
+    chk(runState_c_(demo_chain, 5)[0], 6),
+    chk(runState_c_(demo_chain, 5)[1], 6),
+
+    --- `handle` on a summary IO: get → s0, put → its payload.
+    chk(handled(mk_io({ get: null, put: 9 }), 4).indices[0].put, 9),
+    chk(handled(mk_io({ get: null, put: 9 }), 4).indices[0].get, 4)
+  ]
+} } }
+
+-- ------------------------------------------------------------------------
+-- Module record — the import surface. `data` ctor names stay unexported
+-- (they can't be): consumers mint via `mk_*` factories (same `__ctor__`
+-- shape, `match`-compatible by name) or redeclare `data Json` locally —
+-- `sym.seeded` handles are content-stable across modules.
+-- ------------------------------------------------------------------------
+
+{
+  toStr: toStr_,
+  parse: parse_,
+  parse_st: parse_st_,
+  runState: runState_,
+  runState_c: runState_c_,
+  run_parse: run_parse_,
+  jfirst_scalar: jfirst_scalar_,
+  mk_io: mk_io,
+  chain_get: chain_get,
+  chain_put: chain_put,
+  chain_ret: chain_ret,
+  mk_jnull: mk_jnull,
+  mk_jbool: mk_jbool,
+  mk_jnum: mk_jnum,
+  mk_jstr: mk_jstr,
+  mk_jarr: mk_jarr,
+  mk_jobj: mk_jobj,
+  mk_ok: mk_ok,
+  mk_err: mk_err,
+  mk_perr: mk_perr,
+  smoke: smoke_all
+}
