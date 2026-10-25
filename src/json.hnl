@@ -74,7 +74,7 @@ data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
 --- State(s) — the approved signature (option A): get reads the state,
 --- put replaces it. Written as a record type so `IO(State(s))` spells
 --- out in annotations; note `s` is a *bound* name via the implicit
---- binder — `State{…}` isn't a former, it's sugar for the sig record.
+--- binder — `State<…>` isn't a former, it's sugar for the sig record.
 --- `runState`'s type per the approved design:
 ---   runState : (A ~> IO(State(s))) ~> s ~> (A, s)
 
@@ -328,9 +328,9 @@ parse_ := s ~> while { d: null } { (d) ~> { out: do {
 -- sequencing (`put(p+1)` where `p` came from `get`) needs the op's
 -- *result* fed back into the computation — the reified record can't do
 -- it: the produced IO is data, not a suspended program. The faithful
--- encoding is a chain of single-op IO objects (below): `IO({get: k})`
--- where `k : s ~> IO` receives the get result, `IO({put: [s', k]})`
--- where `k : unit ~> IO`, `IO({ret: a})` terminal — `runState` then is
+-- encoding is a chain of single-op IO objects (below): `IO<{ get: k }>`
+-- where `k : s ~> IO` receives the get result, `IO<{ put: [s', k] }>`
+-- where `k : unit ~> IO`, `IO<{ ret: a }>` terminal — `runState` then is
 -- a while-fold over the *chain* of op entries, and each dispatch is
 -- literally `(payload, s) ~> (result, s)`.
 -- ------------------------------------------------------------------------
@@ -399,7 +399,7 @@ demo_chain := u ~> do {
 --- s0 (g returns s0, p's payload is the new state), independent per
 --- field — the same semantics `runState` gives, spelled via `handle`.
 --- It is NOT a fold: impls never see each other's results.
-handled := (io, s0) ~> handle io with {get: req ~> s0, put: req ~> req}
+handled := (io, s0) ~> handle io with { get: req ~> s0, put: req ~> req }
 
 -- ------------------------------------------------------------------------
 -- API surface — the module record at the bottom is what
