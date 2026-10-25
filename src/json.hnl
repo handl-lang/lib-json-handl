@@ -72,12 +72,23 @@
 -- Types — the checked surface
 -- ------------------------------------------------------------------------
 
-data Json :: JNull | JBool(b : Bool) | JNum(n : Number) | JStr(s : Str)
-           | JArr(xs : [Json]) | JObj(kvs : [[Str, Json]])
+Json := {
+  JNull : Json,
+  JBool : (b : Bool) ~> Json,
+  JNum : (n : Number) ~> Json,
+  JStr : (s : Str) ~> Json,
+  JArr : (xs : [Json]) ~> Json,
+  JObj : (kvs : [[Str, Json]]) ~> Json
+}
 
-data PErr :: PErr(pos : Number, msg : Str)
+PErr := {
+  PErr : (pos : Number, msg : Str) ~> PErr
+}
 
-data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
+Result<e : Type, a : Type> := {
+  Err : (e : e) ~> Result,
+  Ok : (v : a) ~> Result
+}
 
 --- State(s) — the approved signature (option A): get reads the state,
 --- put replaces it. As a typed IO sig it spells
