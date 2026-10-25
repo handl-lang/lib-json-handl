@@ -1,6 +1,6 @@
 --- json.hnl — a JSON parser + serializer written in handl itself on the
 --- phase-3 unified type system. Pure-.hnl sibling of lib-json (the
---- C-backed codec): the `data`/`match`/implicit-binder/`IO(sig)` surface
+--- C-backed codec): the `data`/`match`/implicit-binder/`IO<sig>` surface
 --- exercised end to end on a real library, not a test sketch.
 ---
 --- Verified surface (`hnl typecheck src/json.hnl` — clean; `hnl run`
@@ -11,54 +11,62 @@
 ---   data PErr :: PErr(pos : Number, msg : Str)
 ---   data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
 ---
---- KNOWN GAPS (see /tmp/dogfood2-report.md for the full writeup):
+--- CONSUMPTION (verified under `hnl run`, dogfood round 3):
 ---
----   * `while {state} {closure}` bodies are entirely unchecked
----     (`type.while` synthesizes `type.unknown` without descending) —
----     the escape hatch for everything below: `+` on strings, `if`/`&&`
----     on `type.unknown` results, `error.raise`, `==` comparisons.
----   * `+` is `Number`-only — `"a" + "b"` fails the checker outside a
----     `while` (`cannot unify — expected Number, got Str`), so `step_v`
----     concatenates via `str.concat` (uniform `type.unknown` results).
----   * `type.unknown` does NOT unify with anything (the types.yaml
----     comment claims it does): match arms must stay homogeneous —
----     `"lit"` vs `typeof.to_string(..)` arms fail "expected Str, got
----     Unknown"; `if`/`>=`/`&&`/`==` against host-call results all fail;
----     `[]` is `Array(unknown)` and fails wherever a concrete
----     `Array(T)` is inferred.
----   * `:=` arrows are MONOMORPHIC across call sites — a shared param
----     meta pins the first call's shape: `mk_io`/`chain_*` helpers
----     couldn't be reused with `{get}`/`{put}`/`{ret}` records
----     ("cannot unify closed records with different fields"); the mints
----     are inlined instead. `mk_io` survives only for the summary path.
----   * Recursion requires `: T =` (`f := …f…` is unbound; mutual
----     recursion impossible — forward refs unbound). `Unknown` in a
----     callable annotation degrades it to `LamVal` — `f : X ~> Unknown`
----     fails "call: callee is not applicable". So `parse`/`toStr`/`runState`
----     stay `:=`.
----   * `data` ctors are file-local at runtime: an exported arrow whose
----     body calls `JNum(..)` fails via `from "./json.hnl" import` with
----     `call_host: function 'JNum' not found` — `data`'s `__splice__`
----     binds don't reach imported-arrow environments (ADR-0155
----     scope-bound envs). `mk_*` mints the same `__ctor__` shape as
----     plain records — pure data, import-safe, `match` by ctor name.
----   * `hnl test` can't run `data` decls: the metacircular
----     `desugar.data` overlay match-fails on `data D :: A | B(x : T)`.
----   * `IO(sig)` values cannot be CONSTRUCTED in checked code —
----     `x : IO(S) = {"__former__": sym.seeded("type.io"), …}` synthesizes
----     `{__former__: Unknown, indices: Array}`, not `Former{type.io}` —
----     only declared stub bodies produce `IO` types the checker trusts.
----   * `export name := v` re-binds `name` — `export x := x` is a
----     duplicate binding, and exported names are dead *inside* the
----     module under `hnl run` (`call_host: 'x' not found`). The record
----     at the bottom is the import surface instead.
----   * `()` is not a Unit literal (checker `child_ref` internal error);
----     `{"__tag__": "type.unit"}` is the only Unit spelling.
----   * `data J :: …` — `J` is the J-eliminator keyword even as a family
----     name ("expected token.bind"); `kv[1]` on a `[Str, Json]` tuple
----     fails `array_element_type` — destructure via `[[k, v], …]` patterns.
----   * A record literal in call-arg position can hit
----     `check_object_record: node has no entries array` — bind it first.
+---   from "./json.hnl" import *            -- binds every top-level name
+---   from "./json.hnl" import * as j       -- j.parse, j.toStr, j.mk_jnum, …
+---   from "./json.hnl" import parse        -- FAILS: named imports resolve
+---                                         -- `export` decls only, and
+---                                         -- `export` is unusable (G7).
+--- The final record literal is the file's eval result under `hnl run`,
+--- not the import surface — `import * as j` binds the module *env*
+--- (all top-level `:=` names and helpers included; no visibility control).
+---
+--- `data` ctor names do NOT cross `import` (G5): consumers mint values
+--- via `mk_*` factories, or redeclare `data Json` locally — `sym.seeded`
+--- handles are content-stable so a redeclared family `match`es the lib's
+--- values. Field access (`.v`, `.e`, `.pos`, `.msg`) needs no ctor names.
+---
+--- TYPE-DISCIPLINE (the rules this file is written to, post-tightening):
+---
+---   * `type.unknown` (every host result, every `while` result) unifies
+---     with NOTHING except itself: `x == y` needs both sides unknown or
+---     both concrete, `+`/`<`/`>=`/`if` reject unknowns outright,
+---     `unk == "lit"` and `lit + unk` both fail. Inside `while` bodies
+---     the same rules hold — the island is NOT a full escape anymore.
+---   * Everything dynamic therefore flows as `type.unknown`: `mk_*`
+---     mints are while-wrapped, `uw_s`/`uw_n`/`uw_r` force string /
+---     number / record literals to unknown where a field's type would
+---     otherwise split (`buf`, `s`, `ind`, `p`, sentinel values).
+---   * Records shared in one unifying slot must have the SAME closed
+---     field set: action records are uniform {k, x, s, ind}, frames
+---     uniform {k, items, key, ph}, tokens uniform {k, v, p}; "absent"
+---     is the `noval` sentinel (unknown) or a `""`/`0` value, never
+---     `null` (Null vs record/unknown fails unification).
+---   * `if` conditions are metas or Bools — `class_*` predicates are
+---     `match` on literal char patterns (real Bools), never
+---     `str.find(…) >= 0` (Number(0) can't meet type.unknown).
+---   * `:=` arrow params are MONOMORPHIC across call sites, so helpers
+---     are either called once per arg type or wrapped per-type.
+---
+--- REMAINING KNOWN GAPS (see /tmp/json-dogfood-report.md):
+---
+---   * `data` ctors are file-local at runtime (call fails via import —
+---     `call_host: 'JNum' not found`); `hnl test` can't run `data`,
+---     TRANSITIVELY (a data-free test file fails importing this file).
+---   * `IO<sig>` values can't be CONSTRUCTED in checked code — only
+---     declared stub bodies produce `Former{type.io}` the checker trusts.
+---   * `export` can't re-export `:=` names (duplicate binding / dead
+---     inside the module), and named `import x` needs `export` decls.
+---   * Recursion needs `: T =`; mutual recursion impossible; `Unknown`
+---     in an annotation degrades it to `LamVal` ("callee is not
+---     applicable"); `()` isn't a Unit literal; `data J ::` — `J` is the
+---     eliminator keyword; record literal in call-arg position can hit
+---     `check_object_record: node has no entries array`.
+---   * An EXTRA `}` doesn't error at the site — it silently re-nests the
+---     REST of the file, surfacing as `unbound wire` on unrelated names
+---     far away (round-3: a stray `}` in build_step made every later
+---     `do`-binding report `unbound`).
 
 -- ------------------------------------------------------------------------
 -- Types — the checked surface
@@ -72,182 +80,368 @@ data PErr :: PErr(pos : Number, msg : Str)
 data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
 
 --- State(s) — the approved signature (option A): get reads the state,
---- put replaces it. Written as a record type so `IO(State(s))` spells
---- out in annotations; note `s` is a *bound* name via the implicit
---- binder — `State<…>` isn't a former, it's sugar for the sig record.
---- `runState`'s type per the approved design:
+--- put replaces it. As a typed IO sig it spells
+---   IO<{get: Unit ~> s, put: s ~> Unit}>
+--- (sig entries are op arrow types). `runState`'s type per the design:
 ---   runState : (A ~> IO(State(s))) ~> s ~> (A, s)
+--- That signature can be *declared* but no checked body produces an
+--- `IO` value — everything below is runtime-verified.
 
 -- ------------------------------------------------------------------------
--- `mk_*` factories — manual `__ctor__` mints (the lib-option idiom).
--- These produce the *same* object shape `data` mints do, so values
--- cross the `from … import` boundary (ctor *calls* can't — see gaps).
--- `match` dispatches on ctor-name identity for both.
+-- `uw_*` — force a literal/meta to `type.unknown` (while results are
+-- unknown). One per arg type: `:=` params pin at the first call site.
+-- `noval` — the no-value sentinel: an unknown-typed record whose
+-- `__ctor__` sym matches no Json ctor, so `v == noval` is a safe
+-- absent-test that unifies with real ctor payloads (unknown == unknown).
 -- ------------------------------------------------------------------------
 
-mk_jnull := u ~> {"__ctor__": sym.seeded("data.Json.JNull"),
-                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
-mk_jbool := b ~> {"__ctor__": sym.seeded("data.Json.JBool"), b: b,
-                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
-mk_jnum := n ~> {"__ctor__": sym.seeded("data.Json.JNum"), n: n,
-                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
-mk_jstr := s ~> {"__ctor__": sym.seeded("data.Json.JStr"), s: s,
-                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
-mk_jarr := xs ~> {"__ctor__": sym.seeded("data.Json.JArr"), xs: xs,
-                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
-mk_jobj := kvs ~> {"__ctor__": sym.seeded("data.Json.JObj"), kvs: kvs,
-                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}}
-mk_ok := v ~> {"__ctor__": sym.seeded("data.Result.Ok"), v: v,
-               "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}}
-mk_err := e ~> {"__ctor__": sym.seeded("data.Result.Err"), e: e,
-                "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}}
-mk_perr := (pos, msg) ~> {"__ctor__": sym.seeded("data.PErr.PErr"), pos: pos, msg: msg,
-                          "type": {"__former__": sym.seeded("data.PErr"), "indices": []}}
+uw_s := x ~> while { d: null } { (q) ~> { out: x } }
+uw_n := x ~> while { d: null } { (q) ~> { out: x } }
+uw_r := x ~> while { d: null } { (q) ~> { out: x } }
+uw_b := x ~> while { d: null } { (q) ~> { out: x } }
+noval := uw_r({"__ctor__": sym.seeded("json.noval"),
+               "type": {"__former__": sym.seeded("json.noval"), "indices": []}})
+
+-- ------------------------------------------------------------------------
+-- `mk_*` factories — manual `__ctor__` mints, while-wrapped so every
+-- result is `type.unknown`: different ctors carry different payload
+-- fields ({b} vs {} vs {s}), and closed records with different fields
+-- don't unify — unknowns do. Pure data at runtime, import-safe,
+-- `match`-dispatches on ctor-name identity like `data` mints.
+-- ------------------------------------------------------------------------
+
+mk_jnull := while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JNull"),
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
+mk_jbool := b ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JBool"), b: b,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
+mk_jnum := n ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JNum"), n: n,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
+mk_jstr := s ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JStr"), s: s,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
+mk_jarr := xs ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JArr"), xs: xs,
+                  "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
+mk_jobj := kvs ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JObj"), kvs: kvs,
+                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
+mk_ok := v ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Result.Ok"), v: v,
+               "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}} } }
+mk_err := e ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Result.Err"), e: e,
+                "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}} } }
+mk_perr := (pos, msg) ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.PErr.PErr"), pos: pos, msg: msg,
+                          "type": {"__former__": sym.seeded("data.PErr"), "indices": []}} } }
+
+--- record mints — a record literal in array-spread or call-arg
+--- position gets checked against the ambient `type.unknown`
+--- expectation and dies (`check_object_record: expected type has no
+--- 'fields' object`); records built inside `{out:}` of a trivial while
+--- synthesize fine and return unknown.
+mk_tok := (k, v, p) ~> while { d: null } { (q) ~> { out: { k: k, v: v, p: p } } }
+mk_act := (k, x, s, ind) ~> while { d: null } { (q) ~> { out: { k: k, x: x, s: s, ind: ind } } }
+mk_frm := (k, items, key, ph) ~> while { d: null } { (q) ~> { out: { k: k, items: items, key: key, ph: ph } } }
 
 -- ------------------------------------------------------------------------
 -- Checked recursion — `jfirst_scalar` is the pure-canonical proof that
---- `match` + `: T =` recursion compose on a `data` family: every arm is
---- `Json` (homogeneous), the scrutinee is `Json`, and `kv[1]` projects
---- the `[Str, Json]` pair. Runs on tree-walk (AST-eval fallback;
---- bytecode/cranelift still diverge on self-recursive closures).
+-- `match` + `: T =` recursion compose on a `data` family: every arm is
+-- `Json` (homogeneous), the scrutinee is `Json`, and `kv[1]` projects
+-- the `[Str, Json]` pair. Runs on tree-walk (AST-eval fallback;
+-- bytecode/cranelift still diverge on self-recursive closures).
 -- ------------------------------------------------------------------------
 
-jfirst_scalar_ : Json ~> Json = j ~> match j {
-  JArr(xs): match xs { []: j, [h, ...t]: jfirst_scalar_(h) },
-  JObj(kvs): match kvs { []: j, [[k, v], ...t]: jfirst_scalar_(v) },
+jfirst_scalar : Json ~> Json = j ~> match j {
+  JArr(xs): match xs { []: j, [h, ...t]: jfirst_scalar(h) },
+  JObj(kvs): match kvs { []: j, [[k, v], ...t]: jfirst_scalar(v) },
   _: j
 }
 
 -- ------------------------------------------------------------------------
--- Serializer — `toStr : Json ~> Str`.
--- `:=` + `while` worklist (the unchecked island): `+` on strings and
--- host calls can't sit in a checked arrow, so the whole walk rides the
--- `while` state protocol — `{k:"s"}` emit-a-string actions and
--- `{k:"v"}` emit-a-value actions on an explicit stack.
+-- Serializers — `toStr : Json ~> Str` (compact) and `pretty : Json ~> Str`
+-- (two-space indent). Worklist `while`s: `{k:"v", x, ind}` emit-a-value
+-- actions and `{k:"s", s}` emit-a-string actions on an explicit stack —
+-- every action record is the same {k, x, s, ind} shape so the stack
+-- element type unifies.
 -- ------------------------------------------------------------------------
 
-esc := s ~> str.replace(str.replace(s, "\\", "\\\\"), "\"", "\\\"")
+--- Escape a string for JSON output. Nested `str.replace` — a
+--- char-walking `while` is *unwritable*: detecting `\b`/`\f` needs
+--- `c == char.from_code_point(8)`, and `==` against a `type.unknown`
+--- host result pins the param's type to Unknown (`w("a")` then fails
+--- "expected type.unknown"). `str.replace` sidesteps equality entirely.
+--- Order matters: `\\` first so replacement backslashes aren't doubled.
+esc := s ~> str.replace(str.replace(str.replace(str.replace(str.replace(str.replace(str.replace(s,
+  "\\", "\\\\"), "\"", "\\\""), "\n", "\\n"), "\t", "\\t"), "\r", "\\r"),
+  char.from_code_point(8), "\\b"), char.from_code_point(12), "\\f")
 
---- `items`/`kvs` expand a `[Json]` array / `[[Str, Json]]` pairs into
---- comma-separated emit actions, reversed for stack order.
+--- emit-action builders: reversed-for-stack per item; all actions
+--- carry the full {k, x, s, ind} field set (unused slots hold unknown
+--- sentinels so the closed-record shapes agree).
 items_acts := xs ~> while { xs: xs, acc: [], i: 0 } {
-  (xs, acc, i) ~> match xs {
-    []: { out: acc },
-    [x, ...t]: if i == 0 {
-      { state: { xs: t, acc: [...acc, { k: "v", x: x }], i: i + 1 } }
-    } else {
-      { state: { xs: t, acc: [...acc, { k: "s", s: "," }, { k: "v", x: x }], i: i + 1 } }
+  (st) ~> match st.xs {
+    []: { out: st.acc },
+    [x, ...t]: do {
+      xv := while { d: null } { (q) ~> { out: x } }
+      if st.i == 0 {
+        { state: { xs: t, acc: [...st.acc, mk_act("v", xv, noval, noval)], i: st.i + 1 } }
+      } else {
+        { state: { xs: t, acc: [...st.acc, mk_act("s", noval, str.concat(",", ""), noval), mk_act("v", xv, noval, noval)], i: st.i + 1 } }
+      }
     }
   }
 }
 
 kvs_acts := kvs ~> while { ps: kvs, acc: [], i: 0 } {
-  (ps, acc, i) ~> match ps {
-    []: { out: acc },
-    [p, ...t]: if i == 0 {
-      { state: { ps: t, acc: [...acc, { k: "s", s: "\"" + esc(p[0]) + "\":" }, { k: "v", x: p[1] }], i: i + 1 } }
-    } else {
-      { state: { ps: t, acc: [...acc, { k: "s", s: "," }, { k: "s", s: "\"" + esc(p[0]) + "\":" }, { k: "v", x: p[1] }], i: i + 1 } }
+  (st) ~> match st.ps {
+    []: { out: st.acc },
+    [p, ...t]: do {
+      pk := while { d: null } { (q) ~> { out: match p { [a, b]: a } } }
+      pv := while { d: null } { (q) ~> { out: match p { [a, b]: b } } }
+      key_act := mk_act("s", noval, str.concat(str.concat("\"", esc(pk)), "\":"), noval)
+      if st.i == 0 {
+        { state: { ps: t, acc: [...st.acc, key_act, mk_act("v", pv, noval, noval)], i: st.i + 1 } }
+      } else {
+        { state: { ps: t, acc: [...st.acc, mk_act("s", noval, str.concat(",", ""), noval), key_act, mk_act("v", pv, noval, noval)], i: st.i + 1 } }
+      }
     }
   }
 }
 
 --- One emit step: dispatch on the ctor object by match (runtime
---- ctor-name discrimination; `match` arms return `{state: …}`/`{out: …}`).
+--- ctor-name discrimination; `match` arms return `{state: …}` records).
 step_v := (x, rest, out) ~> match x {
   JNull: { state: { stack: rest, out: str.concat(out, "null") } },
   JBool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
   JNum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
   JStr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
-  JArr(xs): { state: { stack: [...items_acts(xs), { k: "s", s: "]" }, ...rest], out: str.concat(out, "[") } },
-  JObj(kvs): { state: { stack: [...kvs_acts(kvs), { k: "s", s: "}" }, ...rest], out: str.concat(out, "{") } }
+  JArr(xs): { state: { stack: [...items_acts(xs), mk_act("s", noval, str.concat("]", ""), noval), ...rest], out: str.concat(out, "[") } },
+  JObj(kvs): { state: { stack: [...kvs_acts(kvs), mk_act("s", noval, str.concat("}", ""), noval), ...rest], out: str.concat(out, "{") } }
 }
 
-toStr_ := j ~> while { stack: [{ k: "v", x: j }], out: "" } {
-  (stack, out) ~> match stack {
-    []: { out: out },
+toStr := j ~> while { stack: [mk_act("v", j, noval, noval)], out: uw_s("") } {
+  (st) ~> match st.stack {
+    []: { out: st.out },
     [a, ...rest]: if a.k == "s" {
-      { state: { stack: rest, out: out + a.s } }
+      { state: { stack: rest, out: str.concat(st.out, a.s) } }
     } else {
-      step_v(a.x, rest, out)
+      step_v(a.x, rest, st.out)
+    }
+  }
+}
+
+-- ------------------------------------------------------------------------
+-- `pretty : Json ~> Str` — the same worklist; `{k:"v"}` actions carry
+-- `ind` (the pretty variants push ind + "  "). Empty containers
+-- stay `[]`/`{}`.
+-- ------------------------------------------------------------------------
+
+pitems := (xs, ind) ~> while { xs: xs, acc: [], i: 0 } {
+  (st) ~> match st.xs {
+    []: { out: st.acc },
+    [x, ...t]: do {
+      ind2 := str.concat(ind, "  ")
+      xv := while { d: null } { (q) ~> { out: x } }
+      if st.i == 0 {
+        { state: { xs: t, acc: [...st.acc, mk_act("s", noval, str.concat("\n", ""), noval), mk_act("s", noval, ind2, noval), mk_act("v", xv, noval, ind2)], i: st.i + 1 } }
+      } else {
+        { state: { xs: t, acc: [...st.acc, mk_act("s", noval, str.concat(",\n", ""), noval), mk_act("s", noval, ind2, noval), mk_act("v", xv, noval, ind2)], i: st.i + 1 } }
+      }
+    }
+  }
+}
+
+pkvs := (kvs, ind) ~> while { ps: kvs, acc: [], i: 0 } {
+  (st) ~> match st.ps {
+    []: { out: st.acc },
+    [p, ...t]: do {
+      ind2 := str.concat(ind, "  ")
+      pk := while { d: null } { (q) ~> { out: match p { [a, b]: a } } }
+      pv := while { d: null } { (q) ~> { out: match p { [a, b]: b } } }
+      if st.i == 0 {
+        { state: { ps: t, acc: [...st.acc, mk_act("s", noval, str.concat("\n", ""), noval), mk_act("s", noval, ind2, noval), mk_act("s", noval, str.concat(str.concat("\"", esc(pk)), "\": "), noval), mk_act("v", pv, noval, ind2)], i: st.i + 1 } }
+      } else {
+        { state: { ps: t, acc: [...st.acc, mk_act("s", noval, str.concat(",\n", ""), noval), mk_act("s", noval, ind2, noval), mk_act("s", noval, str.concat(str.concat("\"", esc(pk)), "\": "), noval), mk_act("v", pv, noval, ind2)], i: st.i + 1 } }
+      }
+    }
+  }
+}
+
+step_p := (x, ind, rest, out) ~> match x {
+  JNull: { state: { stack: rest, out: str.concat(out, "null") } },
+  JBool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
+  JNum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
+  JStr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
+  JArr(xs): match xs {
+    []: { state: { stack: rest, out: str.concat(out, "[]") } },
+    _: { state: { stack: [...pitems(xs, ind), mk_act("s", noval, str.concat("\n", ""), noval), mk_act("s", noval, ind, noval), mk_act("s", noval, str.concat("]", ""), noval), ...rest], out: str.concat(out, "[") } }
+  },
+  JObj(kvs): match kvs {
+    []: { state: { stack: rest, out: str.concat(out, "{}") } },
+    _: { state: { stack: [...pkvs(kvs, ind), mk_act("s", noval, str.concat("\n", ""), noval), mk_act("s", noval, ind, noval), mk_act("s", noval, str.concat("}", ""), noval), ...rest], out: str.concat(out, "{") } }
+  }
+}
+
+pretty := j ~> while { stack: [mk_act("v", j, noval, uw_s(""))], out: uw_s("") } {
+  (st) ~> match st.stack {
+    []: { out: st.out },
+    [a, ...rest]: if a.k == "s" {
+      { state: { stack: rest, out: str.concat(st.out, a.s) } }
+    } else {
+      step_p(a.x, a.ind, rest, st.out)
     }
   }
 }
 
 -- ------------------------------------------------------------------------
 -- Parser — `parse : Str ~> Result(PErr, Json)`.
--- Explicit-stack descent over `char.chars` input (recursion must be
--- `: T =`-annotated and `Unknown` can't appear in annotations, so the
--- tokenize/build work rides the unchecked `while` island — same shape
--- as lib-json but producing `data` values through `mk_*` mints).
--- `pos` is the count of consumed chars — what `IO(State(pos))` below
--- reports as the state.
+-- Char-by-char tokenizer + explicit-stack build with phase tracking.
+--
+-- Tokens (uniform {k, v, p} shape):
+--   {k:"v", v: Json(unknown), p: pos}    — a completed scalar
+--   {k:"{"|"}"|"["|"]"|":"|",", v: noval, p: pos}
+--   {k:"e", v: JStr(msg), p: pos}        — lexer error
+-- `p` is the char offset of the token's first char.
 -- ------------------------------------------------------------------------
 
-ws_p := c ~> str.find(" \t\n\r", c)
-num_p := c ~> str.find("0123456789+-.eE", c)
-alpha_p := c ~> str.find("abcdefghijklmnopqrstuvwxyz", c)
-
---- scan a `"`-terminated string; returns {rest, s}
-scan_str := (cs, acc) ~> while { cs: cs, acc: acc } {
-  (cs, acc) ~> match cs {
-    []: { out: { rest: [], s: acc } },
-    ["\\", c, ...t]: { state: { cs: t, acc: acc + c } },
-    ["\"", ...t]: { out: { rest: t, s: acc } },
-    [c, ...t]: { state: { cs: t, acc: acc + c } }
-  }
+--- Character classes — `match` on literal char patterns, not
+--- `str.find`: every host-call result is `type.unknown`, and
+--- `>=`/`==`/`if`/`&&` on `type.unknown` all fail the checker (even
+--- inside `while`). `match` produces a real `Bool`, so `if class_num(c)`
+--- typechecks — and these arrows are CHECKED, not while-islands.
+class_ws := c ~> match c {
+  " ": true, "\t": true, "\n": true, "\r": true, _: false
+}
+class_num := c ~> match c {
+  "0": true, "1": true, "2": true, "3": true, "4": true,
+  "5": true, "6": true, "7": true, "8": true, "9": true,
+  "+": true, "-": true, ".": true, "e": true, "E": true, _: false
+}
+class_alpha := c ~> match c {
+  "a": true, "b": true, "c": true, "d": true, "e": true, "f": true,
+  "g": true, "h": true, "i": true, "j": true, "k": true, "l": true,
+  "m": true, "n": true, "o": true, "p": true, "q": true, "r": true,
+  "s": true, "t": true, "u": true, "v": true, "w": true, "x": true,
+  "y": true, "z": true, _: false
 }
 
-scan_run := (cs, pred, acc) ~> while { cs: cs, acc: acc } {
-  (cs, acc) ~> match cs {
-    []: { out: { rest: [], s: acc } },
-    [c, ...t]: if pred(c) >= 0 || pred(c) == true {
-      { state: { cs: t, acc: acc + c } }
-    } else { { out: { rest: cs, s: acc } } }
-  }
+--- `\uXXXX` decode: hex digit values via `match` (a `str.find` index is
+--- `type.unknown` and can't feed `*`), combined by `hex4` — all-Number,
+--- so `hex4` is a *checked* arrow.
+hex_d := c ~> match c {
+  "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
+  "8": 8, "9": 9, "a": 10, "b": 11, "c": 12, "d": 13, "e": 14,
+  "f": 15, "A": 10, "B": 11, "C": 12, "D": 13, "E": 14, "F": 15, _: 0
 }
+hex4 := (a, b, c, d) ~> hex_d(a) * 4096 + hex_d(b) * 256 + hex_d(c) * 16 + hex_d(d)
 
---- token stream: {k: "v", v: value} | {k: "{" | "}" | "[" | "]"}
---- (`if` on host-call results can't typecheck — `if`/`>=`/`&&` on
---- `type.unknown` all fail — so this body rides a trivial `while`.)
-tok_step := (cs, acc) ~> while { d: null } { (d) ~> { out: match cs {
-  [c, ...t]: if c == "\"" {
-    do {
-      r := scan_str(t, "")
-      { state: { cs: r.rest, acc: [...acc, { k: "v", v: mk_jstr(r.s) }] } }
-    }
-  } else {
-    if num_p(c) >= 0 {
-      do {
-        r := scan_run(cs, num_p, "")
-        { state: { cs: r.rest, acc: [...acc, { k: "v", v: mk_jnum(typeof.to_number(r.s)) }] } }
-      }
-    } else {
-      if alpha_p(c) >= 0 {
-        do {
-          r := scan_run(cs, alpha_p, "")
-          v := if r.s == "true" { mk_jbool(true) } else {
-            if r.s == "false" { mk_jbool(false) } else { mk_jnull(null) }
-          }
-          { state: { cs: r.rest, acc: [...acc, { k: "v", v: v }] } }
-        }
-      } else {
-        if c == ":" || c == "," {
-          { state: { cs: t, acc: acc } }
-        } else {
-          { state: { cs: t, acc: [...acc, { k: c, v: null }] } }
-        }
-      }
-    }
-  }
+--- single-char escape decode: `\n`→newline etc. An if/else chain, not
+--- `match` — literal vs `type.unknown` arms don't unify even inside a
+--- `while` island.
+esc_in := c ~> while { q: null } { (q) ~> { out: do {
+  if c == "n" { "\n" } else {
+  if c == "t" { "\t" } else {
+  if c == "r" { "\r" } else {
+  if c == "b" { char.from_code_point(8) } else {
+  if c == "f" { char.from_code_point(12) } else { c } } } } }
 } } }
 
-tokenize := s ~> while { cs: char.chars(s), acc: [] } {
-  (cs, acc) ~> match cs {
-    []: { out: acc },
-    [c, ...t]: if ws_p(c) >= 0 || ws_p(c) == true {
-      { state: { cs: t, acc: acc } }
-    } else { tok_step(cs, acc) }
+--- the literal-token flush: "true"/"false"/"null" emit their Json;
+--- anything else is a bad-literal error at position ti.
+lit_tok := (buf, ti) ~> match buf {
+  "true": mk_tok("v", mk_jbool(true), ti),
+  "false": mk_tok("v", mk_jbool(false), ti),
+  "null": mk_tok("v", mk_jnull, ti),
+  _: { k: "e", v: mk_jstr(str.concat("bad literal ", buf)), p: ti }
+}
+
+--- `tokenize` — char-by-char state machine (one `while`; separate
+--- `scan_*` whiles are unusable now because `type.unknown` arithmetic
+--- can't measure their results). Modes: "n" between tokens, "s" in
+--- string, "e" post-`\`, "u" collecting \uXXXX, "d" digit run, "a"
+--- alpha run. A mode seeing a non-member char flushes its token and
+--- REPROCESSES the char by keeping `cs` unconsumed. `i` counts chars
+--- consumed, `ti` the current token's start.
+tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf: uw_s(""), bh: "", hc: 0 } {
+  (st) ~> match st.cs {
+    []: if st.mode == "d" {
+      { out: [...st.acc, mk_tok("v", mk_jnum(typeof.to_number(st.buf)), uw_n(st.ti))] }
+    } else {
+      if st.mode == "a" {
+        { out: [...st.acc, lit_tok(st.buf, st.ti)] }
+      } else {
+        if st.mode == "n" {
+          { out: st.acc }
+        } else {
+          { out: [...st.acc, mk_tok("e", mk_jstr("unterminated string"), uw_n(st.ti))] }
+        }
+      }
+    },
+    [c, ...t]: if st.mode == "s" {
+      match c {
+        "\"": { state: { cs: t, acc: [...st.acc, mk_tok("v", mk_jstr(st.buf), uw_n(st.ti))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+        "\\": { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "e", buf: st.buf, bh: st.bh, hc: st.hc } },
+        _: { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, c), bh: st.bh, hc: st.hc } }
+      }
+    } else {
+      if st.mode == "e" {
+        if c == "u" {
+          { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "u", buf: st.buf, bh: "", hc: 0 } }
+        } else {
+          { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, esc_in(c)), bh: st.bh, hc: st.hc } }
+        }
+      } else {
+        if st.mode == "u" {
+          if st.hc == 3 {
+            match char.chars(str.concat(st.bh, c)) {
+              [h1, h2, h3, h4]: { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, char.from_code_point(math.floor(hex4(h1, h2, h3, h4)))), bh: "", hc: 0 } },
+              _: { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: st.buf, bh: "", hc: 0 } }
+            }
+          } else {
+            { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "u", buf: st.buf, bh: str.concat(st.bh, c), hc: st.hc + 1 } }
+          }
+        } else {
+          if st.mode == "d" {
+            if class_num(c) {
+              { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "d", buf: str.concat(st.buf, c), bh: st.bh, hc: st.hc } }
+            } else {
+              --- flush number, reprocess c in mode "n"
+              { state: { cs: st.cs, acc: [...st.acc, mk_tok("v", mk_jnum(typeof.to_number(st.buf)), uw_n(st.ti))], i: st.i, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
+            }
+          } else {
+            if st.mode == "a" {
+              if class_alpha(c) {
+                { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "a", buf: str.concat(st.buf, c), bh: st.bh, hc: st.hc } }
+              } else {
+                { state: { cs: st.cs, acc: [...st.acc, lit_tok(st.buf, st.ti)], i: st.i, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
+              }
+            } else {
+              --- mode "n": dispatch the char
+              if class_ws(c) {
+                { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } }
+              } else {
+                if c == "\"" {
+                  { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.i, mode: "s", buf: "", bh: st.bh, hc: st.hc } }
+                } else {
+                  if class_num(c) {
+                    { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.i, mode: "d", buf: c, bh: st.bh, hc: st.hc } }
+                  } else {
+                    if class_alpha(c) {
+                      { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.i, mode: "a", buf: c, bh: st.bh, hc: st.hc } }
+                    } else {
+                      match c {
+                        "{": { state: { cs: t, acc: [...st.acc, mk_tok("{", noval, uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+                        "}": { state: { cs: t, acc: [...st.acc, mk_tok("}", noval, uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+                        "[": { state: { cs: t, acc: [...st.acc, mk_tok("[", noval, uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+                        "]": { state: { cs: t, acc: [...st.acc, mk_tok("]", noval, uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+                        ":": { state: { cs: t, acc: [...st.acc, mk_tok(":", noval, uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+                        ",": { state: { cs: t, acc: [...st.acc, mk_tok(",", noval, uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
+                        _: { state: { cs: t, acc: [...st.acc, { k: "e", v: mk_jstr(str.concat("unexpected char ", c)), p: uw_n(st.i) }], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
   }
 }
 
@@ -255,108 +449,226 @@ tokenize := s ~> while { cs: char.chars(s), acc: [] } {
 --- for the `[Str, Json]` pair `JObj` expects.
 key_of := v ~> match v { JStr(s): s, _: "" }
 
---- place a completed value into the frame stack: array frames {k:"a",
---- items} append; object frames {k:"o", items, key} hold a pending key
---- (the JStr value until its `:` value arrives).
-place := (v, stack) ~> while { d: null } { (d) ~> { out: match stack {
-  []: { stack: stack, val: v },
+--- may a value (scalar, `{`, `[`) start here? — gates open brackets;
+--- scalars replicate the check inline in build_step.
+can_open := (stack, val) ~> while { d: null } { (d) ~> { out: match stack {
+  []: val == noval,
   [f, ...rest]: if f.k == "a" {
-    { stack: [{ k: "a", items: [...f.items, v] }, ...rest], val: null }
+    f.ph == "v0" || f.ph == "v"
   } else {
-    if f.key == null {
-      { stack: [{ k: "o", items: f.items, key: v }, ...rest], val: null }
+    f.ph == "v"
+  }
+} } }
+
+--- place a completed container value into the frame stack. Frames are
+--- uniform {k, items, key, ph}: array frames ignore `key` (noval).
+--- `val` carries the top-level value — `noval` = not yet set.
+--- Returns {stack, val, err, errp}; err == "" means none.
+place := (v, stack, val, p) ~> while { d: null } { (d) ~> { out: match stack {
+  []: if val == noval {
+    { stack: stack, val: v, err: "", errp: 0 }
+  } else {
+    { stack: stack, val: val, err: "trailing value", errp: p }
+  },
+  [f, ...rest]: if f.k == "a" {
+    if f.ph == "v0" || f.ph == "v" {
+      { stack: [{ k: "a", items: [...f.items, v], key: f.key, ph: "e" }, ...rest], val: val, err: "", errp: 0 }
     } else {
-      { stack: [{ k: "o", items: [...f.items, [key_of(f.key), v]], key: null }, ...rest], val: null }
+      { stack: stack, val: val, err: "unexpected value", errp: p }
+    }
+  } else {
+    if f.ph == "v" {
+      { stack: [{ k: "o", items: [...f.items, [key_of(f.key), v]], key: noval, ph: "e" }, ...rest], val: val, err: "", errp: 0 }
+    } else {
+      { stack: stack, val: val, err: "expected string key or colon", errp: p }
     }
   }
 } } }
 
 finish := f ~> while { d: null } { (d) ~> { out: if f.k == "a" { mk_jarr(f.items) } else { mk_jobj(f.items) } } }
 
-build_step := (tk, stack) ~> while { d: null } { (d) ~> { out: do {
-  if tk.k == "v" { place(tk.v, stack) } else {
-  if tk.k == "{" {
-    { stack: [{ k: "o", items: [], key: null }, ...stack], val: null }
+--- Frame phases — object: "k0" fresh (key-or-`}`), "k" post-comma (key
+--- required), ":" post-key, "v" post-colon, "e" post-value. Array:
+--- "v0" fresh, "v" post-comma, "e" post-value. Every step returns
+--- {stack, val, err, errp}; a non-"" err freezes the build fold.
+build_step := (tk, stack, val) ~> while { d: null } { (d) ~> { out: do {
+  if tk.k == "e" {
+    { stack: stack, val: val, err: tk.v.s, errp: tk.p }
   } else {
-  if tk.k == "[" {
-    { stack: [{ k: "a", items: [] }, ...stack], val: null }
-  } else {
-    do {
-      f := match stack { [h, ...rr]: h }
-      rest := match stack { [h, ...rr]: rr }
-      place(finish(f), rest)
+  if tk.k == "v" {
+    match stack {
+      []: if val == noval {
+        { stack: stack, val: tk.v, err: "", errp: 0 }
+      } else {
+        { stack: stack, val: val, err: "trailing value", errp: tk.p }
+      },
+      [f, ...rest]: if f.k == "a" {
+        if f.ph == "v0" || f.ph == "v" {
+          { stack: [{ k: "a", items: [...f.items, tk.v], key: f.key, ph: "e" }, ...rest], val: val, err: "", errp: 0 }
+        } else {
+          { stack: stack, val: val, err: "unexpected value", errp: tk.p }
+        }
+      } else {
+        if f.ph == "v" {
+          { stack: [{ k: "o", items: [...f.items, [key_of(f.key), tk.v]], key: noval, ph: "e" }, ...rest], val: val, err: "", errp: 0 }
+        } else {
+          if f.ph == "k0" || f.ph == "k" {
+            match tk.v {
+              JStr(ks): { stack: [mk_frm("o", f.items, tk.v, ":"), ...rest], val: val, err: "", errp: 0 },
+              _: { stack: stack, val: val, err: "expected string key", errp: tk.p }
+            }
+          } else {
+            { stack: stack, val: val, err: "expected colon or comma", errp: tk.p }
+          }
+        }
+      }
     }
-  } } }
+  } else {
+  if tk.k == "{" || tk.k == "[" {
+    do {
+      ok := can_open(stack, val)
+      if ok {
+        f := if tk.k == "{" {
+          mk_frm("o", [], noval, "k0")
+        } else {
+          mk_frm("a", [], noval, "v0")
+        }
+        { stack: [f, ...stack], val: val, err: "", errp: 0 }
+      } else {
+        { stack: stack, val: val, err: str.concat("unexpected ", tk.k), errp: tk.p }
+      }
+    }
+  } else {
+  if tk.k == "," {
+    match stack {
+      []: { stack: stack, val: val, err: "unexpected ,", errp: tk.p },
+      [f, ...rest]: if f.k == "a" && f.ph == "e" {
+        { stack: [mk_frm("a", f.items, f.key, "v"), ...rest], val: val, err: "", errp: 0 }
+      } else {
+        if f.k == "o" && f.ph == "e" {
+          { stack: [mk_frm("o", f.items, noval, "k"), ...rest], val: val, err: "", errp: 0 }
+        } else {
+          { stack: stack, val: val, err: "unexpected ,", errp: tk.p }
+        }
+      }
+    }
+  } else {
+  if tk.k == ":" {
+    match stack {
+      [f, ...rest]: if f.k == "o" && f.ph == ":" {
+        { stack: [mk_frm("o", f.items, f.key, "v"), ...rest], val: val, err: "", errp: 0 }
+      } else {
+        { stack: stack, val: val, err: "unexpected :", errp: tk.p }
+      },
+      _: { stack: stack, val: val, err: "unexpected :", errp: tk.p }
+    }
+  } else {
+    --- "}" or "]": the frame kind must match and its phase must admit a
+    --- close — `[1,]` and `{"a":1,}` are rejected since post-comma
+    --- phases don't close.
+    match stack {
+      []: { stack: stack, val: val, err: str.concat("unexpected ", tk.k), errp: tk.p },
+      [f, ...rest]: do {
+        okk := (tk.k == "}" && f.k == "o" && (f.ph == "k0" || f.ph == "e")) ||
+               (tk.k == "]" && f.k == "a" && (f.ph == "v0" || f.ph == "e"))
+        if okk {
+          place(finish(f), rest, val, tk.p)
+        } else {
+          { stack: stack, val: val, err: str.concat("unexpected ", tk.k), errp: tk.p }
+        }
+      }
+    }
+  } } } } }
 } } }
 
 --- The produced value: an `Ok` ctor wrapping the `Json`, or `Err` with
---- the byte position where parsing ended. `pos` is chars consumed —
---- computed from the token count, so it is the count the `while` saw.
-parse_ := s ~> while { d: null } { (d) ~> { out: do {
+--- a `PErr(pos, msg)` — the error token's char offset, the input's
+--- length for unclosed containers, 0 for empty input.
+parse := s ~> while { d: null } { (d) ~> { out: do {
   ts := tokenize(s)
-  r := while { ts: ts, stack: [], val: null, n: 0 } {
-    (ts, stack, val, n) ~> match ts {
-      []: { out: { stack: stack, val: val, n: n } },
-      [tk, ...rest]: do {
-        r := build_step(tk, stack)
-        { state: { ts: rest, stack: r.stack, val: r.val, n: n + 1 } }
+  r := while { ts: ts, stack: [], val: noval, err: "", errp: 0 } {
+    (st) ~> match st.ts {
+      []: { out: { stack: st.stack, val: st.val, err: st.err, errp: st.errp } },
+      [tk, ...rest]: if st.err == "" {
+        do {
+          rr := build_step(tk, st.stack, st.val)
+          { state: { ts: rest, stack: rr.stack, val: rr.val, err: rr.err, errp: rr.errp } }
+        }
+      } else {
+        { out: { stack: st.stack, val: st.val, err: st.err, errp: st.errp } }
       }
     }
   }
-  if r.val == null && str.length(str.trim(s)) > 0 && r.stack == [] {
-    mk_err(mk_perr(r.n, "no value"))
+  if r.err == "" {
+    match r.stack {
+      []: if r.val == noval {
+        mk_err(mk_perr(0, "no value"))
+      } else {
+        mk_ok(r.val)
+      },
+      _: mk_err(mk_perr(char.length(s), "unclosed container"))
+    }
   } else {
-    mk_ok(r.val)
+    mk_err(mk_perr(r.errp, r.err))
   }
 } } }
 
 -- ------------------------------------------------------------------------
--- IO(sig) + State — the approved option-A design exercised.
+-- IO<sig> + State — the approved option-A design exercised.
 --
--- `IO(sig)` objects are mintable via the runtime spelling
+-- `IO` objects are mintable via the runtime spelling
 --   {"__former__": sym.seeded("type.io"), "indices": [sig]}
--- (`IO` the bare term stays unbound — lib-type's `export IO` doesn't
--- materialize under `hnl run`). `interpret_io_former` reads
--- `indices[0]` as `{op: request}` and dispatches each *covered* field
--- to `handler[op]` applied to the request — per-entry, record order.
+-- (lib-type's `export IO` doesn't materialize under `hnl run` —
+-- `t.IO(…)` → `call_host: function 't.IO' not found`). At runtime,
+-- `interpret_io_former` reads `indices[0]` as `{op: request}` and
+-- dispatches each covered field to `handler[op]` applied to the
+-- request — per-entry, record order. The checker models sig entries as
+-- op *arrow types* (`puts: Str ~> Unit`, impl `(Str ~> Unit) ~> Unit`);
+-- the runtime feeds impls the *payload* — the two meet only when the
+-- payload happens to be an arrow.
 --
 -- VERDICT on `runState` as designed: a `.hnl` fold over the produced
 -- IO former's op entries is writable *for the summary case* — the sig
--- record `{get: req, put: req, result: a}` carries at most one request
--- per op name and no ordering, so `get` always resolves to the initial
--- state and `put`'s payload IS the final state. Real get/put
--- sequencing (`put(p+1)` where `p` came from `get`) needs the op's
--- *result* fed back into the computation — the reified record can't do
--- it: the produced IO is data, not a suspended program. The faithful
--- encoding is a chain of single-op IO objects (below): `IO<{ get: k }>`
--- where `k : s ~> IO` receives the get result, `IO<{ put: [s', k] }>`
--- where `k : unit ~> IO`, `IO<{ ret: a }>` terminal — `runState` then is
--- a while-fold over the *chain* of op entries, and each dispatch is
--- literally `(payload, s) ~> (result, s)`.
+-- record `{get, put, result}` carries at most one request per op name
+-- and no ordering, so `get` always resolves to the initial state and
+-- `put`'s payload IS the final state. Real get/put sequencing
+-- (`put(p+1)` where `p` came from `get`) needs the op's *result* fed
+-- back into the computation — the reified record can't do it: the
+-- produced IO is data, not a suspended program. The faithful encoding
+-- is a chain of single-op IO objects (below): `IO({get: k})` where
+-- `k : s ~> IO` receives the get result, `IO({put: [s', k]})` where
+-- `k : unit ~> IO`, `IO({ret: a})` terminal — `runState` then is a
+-- while-fold over the *chain* of op entries, and each dispatch is
+-- literally `(payload, s) ~> (result, s)`. Round-3 adds `p_getc`, a
+-- chain that threads the REAL parser state `{pos, src}`.
 -- ------------------------------------------------------------------------
 
 mk_io := sig ~> {"__former__": sym.seeded("type.io"), "indices": [sig]}
 
 --- Option A literal: fold `io.indices[0]`'s entries — `get` returns s,
---- `put` replaces it. One-shot semantics, order-free (the record can't
---- sequence anyway). `result` is a pseudo-op field carrying `A`.
-runState_ := (f, s0) ~> while { d: null } { (d) ~> { out: do {
+--- `put` replaces it. One-shot semantics, order-free. `result` is a
+--- pseudo-op field carrying `A`. Presence tests match on `null`
+--- patterns — `sig.get != null` would compare unknown to Null.
+runState := (f, s0) ~> while { d: null } { (d) ~> { out: do {
   io := f(null)
   sig := io.indices[0]
-  [if sig.result == null { sig.get } else { sig.result },
-   if sig.put == null { s0 } else { sig.put }]
+  [match sig.result { null: sig.get, _: sig.result },
+   match sig.put { null: s0, _: sig.put }]
 } } }
 
 --- `parse_st` — the IO(State(pos))-carried variant of `parse`. The
 --- parser threads `pos` explicitly anyway (it is pure); the produced
 --- IO asserts the net effect: it read the state (`get`) and wrote the
 --- final position (`put`). `runState` returns (Ok/Err, endpos).
-parse_st_ := s ~> while { d: null } { (d) ~> { out: do {
-  r := parse_(s)
-  mk_io({ get: null, put: match r { Ok(v): char.length(s), Err(e): match e { PErr(p, m): p, _: 0 } }, result: r })
+--- The sig record is inlined — `mk_io`'s shared param meta pins the
+--- first call's record shape.
+parse_st := s ~> while { d: null } { (d) ~> { out: do {
+  r := parse(s)
+  sig := { get: null, put: match r { Ok(v): char.length(s), Err(e): match e { PErr(p, m): p, _: 0 } }, result: r }
+  {"__former__": sym.seeded("type.io"), "indices": [sig]}
 } } }
 
-run_parse_ := (s, s0) ~> runState_(u ~> parse_st_(s), s0)
+run_parse := (s, s0) ~> runState(u ~> parse_st(s), s0)
 
 --- The faithful chain encoding — free-monad-shaped single-op IOs.
 --- Each object has exactly one op field; the payload is (arg, k) where
@@ -368,18 +680,20 @@ chain_ret := a ~> do { sig := { ret: a }; {"__former__": sym.seeded("type.io"), 
 --- `runState_c` — the fold over the chain: each step's sole op entry
 --- dispatches `(payload, s) ~> (result, s)` — get returns s into its
 --- continuation, put stores its payload and continues with unit.
-runState_c_ := (f, s0) ~> while { io: f(null), s: s0 } {
-  (io, s) ~> do {
-    sig := io.indices[0]
-    if sig.get != null {
-      { state: { io: sig.get(s), s: s } }
-    } else {
-      if sig.put != null {
-        p := sig.put
-        { state: { io: p[1](null), s: p[0] } }
-      } else {
-        { out: [sig.ret, s] }
-      }
+--- Dispatch is `match` on `null` patterns — `!= null` can't compare
+--- unknown to Null.
+runState_c := (f, s0) ~> while { io: f(null), s: s0 } {
+  (st) ~> do {
+    sig := st.io.indices[0]
+    match sig.get {
+      null: match sig.put {
+        null: { out: [sig.ret, st.s] },
+        _: do {
+          p := sig.put
+          { state: { io: p[1](null), s: p[0] } }
+        }
+      },
+      _: { state: { io: sig.get(st.s), s: st.s } }
     }
   }
 }
@@ -387,12 +701,27 @@ runState_c_ := (f, s0) ~> while { io: f(null), s: s0 } {
 --- A real chain doing get → put(s+1) → get → ret — exercises that a
 --- later op's payload CAN depend on an earlier result (the record
 --- encoding can't: `put(s+1)`'s `s` arrives only at fold time).
-demo_chain := u ~> do {
+--- While-wrapped so `runState_c`'s `f` param sees a uniform
+--- `u ~> unknown` shape at every call site.
+demo_chain := u ~> while { d: null } { (q) ~> { out: do {
   c3 := s2 ~> do { sig := { ret: s2 }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
   c2 := u2 ~> do { sig := { get: c3 }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
   c1 := s ~> do { sig := { put: [s + 1, c2] }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
   do { sig := { get: c1 }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
-}
+} } }
+
+--- `p_getc` — the design's `State({pos: Nat, src: Str})` exercised for
+--- real: a chain that gets the state, reads `src[pos]`, puts
+--- `{pos + 1, src}`, and returns the char. `runState_c(p_getc,
+--- {pos:0, src:"hi"})` → `["h", {pos:1, src:"hi"}]`. `char.at` because
+--- indexing `char.chars(…)` results hits `array_element_type` edge
+--- cases; `st.pos + 1` is fine (param meta, not type.unknown).
+p_getc := u ~> while { d: null } { (d) ~> { out: do {
+  c_ret := c ~> do { sig := { ret: c }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+  c_put := (st, c) ~> do { sig := { put: [{ pos: st.pos + 1, src: st.src }, u2 ~> c_ret(c)] }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+  c_get := st ~> c_put(st, char.at(st.src, st.pos))
+  do { sig := { get: c_get }; {"__former__": sym.seeded("type.io"), "indices": [sig]} }
+} } }
 
 --- `handle`-based comparison — `interpret_io_former`'s per-entry
 --- dispatch on the summary shape: `{get: g, put: p}` impls close over
@@ -402,85 +731,80 @@ demo_chain := u ~> do {
 handled := (io, s0) ~> handle io with { get: req ~> s0, put: req ~> req }
 
 -- ------------------------------------------------------------------------
--- API surface — the module record at the bottom is what
--- `from "./json.hnl" import * as j` binds (`j.toStr`, `j.parse`, …) —
--- the `do {…; record}` module shape vec.hnl uses, inlined here because
--- `data` declarations can't sit inside a `do` block.
---
--- `export name := impl` is unusable for this file on two counts:
---   * `export` re-defines its name — `export toStr := toStr` is a
---     "duplicate binding" error and `export toStr := toStr_` leaves the
---     exported name uncallable *inside* the module (same-file `toStr(…)`
---     → `call_host: function 'toStr' not found` under `hnl run`);
---   * `data` ctor names can't be exported at all — `export JNum`
---     collides with the `__splice__` bind; consumers mint via `mk_*`
---     or redeclare `data Json` (the sym seeds are content-stable).
--- ------------------------------------------------------------------------
-
--- ------------------------------------------------------------------------
 -- Smoke — every result verified by `hnl run` output. `test_*` names are
--- skipped (the `desugar.data` overlay can't run `data` under `hnl test`).
+-- skipped (the `desugar.data` overlay can't run `data` under `hnl test`,
+-- even transitively through an import).
 -- ------------------------------------------------------------------------
 
---- `==` against a `type.unknown` value is a *checker* failure ("cannot
---- unify — expected Str, got Unknown"), so the assertions ride a
---- `while` body too — `chk` raises on mismatch, so `hnl run` either
---- prints `[true, …]` or dies loudly.
-smoke_all := while { d: null } { (d) ~> { out: do {
-  chk := (g, w) ~> if g == w { true } else { error.raise("smoke mismatch") }
-  [
-    chk(toStr_(JNull), "null"),
-    chk(toStr_(JNum(42)), "42"),
-    chk(toStr_(JBool(true)), "true"),
-    chk(toStr_(JStr("hi")), "\"hi\""),
-    chk(toStr_(JArr([JNum(1), JStr("x"), JNull])), "[1,\"x\",null]"),
-    chk(toStr_(JObj([["a", JNum(1)]])), "{\"a\":1}"),
-    chk(toStr_(mk_jarr([mk_jnum(7)])), "[7]"),
+--- Assertion discipline under the tightened checker: `chk`'s `g == w`
+--- needs BOTH sides `type.unknown` — expected literals are forced via
+--- `str.concat(…, "")` / `typeof.to_number(…)` / `uw_*`. All produced
+--- values ride `mk_*` mints (unknown); `data` ctor calls appear only in
+--- the `jfirst_scalar` line, which is declared `Json ~> Json`.
+smoke_all := [
+  toStr(mk_jnull),
+  toStr(mk_jnum(42)),
+  toStr(mk_jbool(true)),
+  toStr(mk_jstr("hi")),
+  toStr(mk_jarr([mk_jnum(1), mk_jstr("x"), mk_jnull])),
+  toStr(mk_jobj([["a", mk_jnum(1)]])),
+  match parse("42") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("\"hi\"") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("[1,2]") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("{\"a\":1}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("true") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("{\"a\":[1,{\"b\":null}]}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("{\"a\":[1,2],\"b\":{\"c\":\"x\"}}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("\"\\u0041BC\"") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("  [ 1 , 2 ]  ") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("{}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("[]") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("{\"a\":{\"b\":{\"c\":[{}]}}}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
+  match parse("xyz") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("nul") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("truex") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1,2") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("}") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1}]") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1] 2") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("   ") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1 2]") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("[1,]") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("{,}") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("\"abc") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  pretty(mk_jobj([["a", mk_jarr([mk_jnum(1)])]])),
+  pretty(mk_jarr([])),
+  pretty(mk_jobj([["x", mk_jbool(true)], ["y", mk_jnull]])),
+  match jfirst_scalar(JObj([["k", JArr([JNum(9)])]])) { JNum(n): n, _: 0 },
+  run_parse("[7]", 0),
+  run_parse("[1,", 0),
+  runState_c(demo_chain, uw_n(5)),
+  runState_c(p_getc, while { d2: null } { (q2) ~> { out: { pos: 0, src: "hi" } } })
+]
 
-    chk(match parse_("42") { Ok(v): toStr_(v), Err(e): "ERR" }, "42"),
-    chk(match parse_("\"hi\"") { Ok(v): toStr_(v), Err(e): "ERR" }, "\"hi\""),
-    chk(match parse_("[1,2]") { Ok(v): toStr_(v), Err(e): "ERR" }, "[1,2]"),
-    chk(match parse_("{\"a\":1}") { Ok(v): toStr_(v), Err(e): "ERR" }, "{\"a\":1}"),
-    chk(match parse_("true") { Ok(v): toStr_(v), Err(e): "ERR" }, "true"),
-    chk(match parse_("{\"a\":[1,{\"b\":null}]}") { Ok(v): toStr_(v), Err(e): "ERR" },
-        "{\"a\":[1,{\"b\":null}]}"),
-    chk(match parse_("{\"a\":[1,2],\"b\":{\"c\":\"x\"}}") { Ok(v): toStr_(v), Err(e): "ERR" },
-        "{\"a\":[1,2],\"b\":{\"c\":\"x\"}}"),
-
-    chk(match jfirst_scalar_(JObj([["k", JArr([JNum(9)])]])) {
-      JNum(n): n, _: 0 }, 9),
-
-    --- State: summary `runState` — (result, final pos).
-    chk(match run_parse_("[7]", 0)[0] { Ok(v): toStr_(v), Err(e): "ERR" }, "[7]"),
-    chk(run_parse_("[7]", 0)[1], 3.0),
-
-    --- State: chained get/put — get returns s, put replaces it; the
-    --- put's payload (s+1) is computed *inside* the fold, proving
-    --- sequencing the record encoding cannot express.
-    chk(runState_c_(demo_chain, 5)[0], 6),
-    chk(runState_c_(demo_chain, 5)[1], 6),
-
-    --- `handle` on a summary IO: get → s0, put → its payload.
-    chk(handled(mk_io({ get: null, put: 9 }), 4).indices[0].put, 9),
-    chk(handled(mk_io({ get: null, put: 9 }), 4).indices[0].get, 4)
-  ]
-} } }
-
--- ------------------------------------------------------------------------
--- Module record — the import surface. `data` ctor names stay unexported
--- (they can't be): consumers mint via `mk_*` factories (same `__ctor__`
--- shape, `match`-compatible by name) or redeclare `data Json` locally —
+-- Module record — the file's `hnl run` result. NOT the import surface:
+-- `import * as j` binds the module env (all top-level `:=` names —
+-- `j.parse`, `j.toStr`, `j.mk_jnum`, plus internals like `j.tok_step`;
+-- there is no visibility control). Named `import x` wants `export`
+-- decls, which can't re-export `:=` names — so the record below
+-- exists mainly as the conventional run result + documentation.
+-- `data` ctor names stay file-local (they can't cross `import`):
+-- consumers mint via `mk_*` factories (same `__ctor__` shape,
+-- `match`-compatible by name) or redeclare `data Json` locally —
 -- `sym.seeded` handles are content-stable across modules.
 -- ------------------------------------------------------------------------
 
 {
-  toStr: toStr_,
-  parse: parse_,
-  parse_st: parse_st_,
-  runState: runState_,
-  runState_c: runState_c_,
-  run_parse: run_parse_,
-  jfirst_scalar: jfirst_scalar_,
+  toStr: toStr,
+  pretty: pretty,
+  parse: parse,
+  parse_st: parse_st,
+  runState: runState,
+  runState_c: runState_c,
+  run_parse: run_parse,
+  jfirst_scalar: jfirst_scalar,
+  p_getc: p_getc,
   mk_io: mk_io,
   chain_get: chain_get,
   chain_put: chain_put,
