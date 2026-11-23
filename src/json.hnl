@@ -171,15 +171,46 @@ jfirst_scalar : Json ~> Json = j ~> match j {
 -- element type unifies.
 -- ------------------------------------------------------------------------
 
---- Escape a string for JSON output. Nested `str.replace` — a
---- char-walking `while` is *unwritable*: detecting `\b`/`\f` needs
---- `c == char.from_code_point(8)`, and `==` against a `type.unknown`
---- host result pins the param's type to Unknown (`w("a")` then fails
---- "expected type.unknown"). `str.replace` sidesteps equality entirely.
---- Order matters: `\\` first so replacement backslashes aren't doubled.
-esc := s ~> str.replace(str.replace(str.replace(str.replace(str.replace(str.replace(str.replace(s,
-  "\\", "\\\\"), "\"", "\\\""), "\n", "\\n"), "\t", "\\t"), "\r", "\\r"),
-  char.from_code_point(8), "\\b"), char.from_code_point(12), "\\f")
+--- Escape a string for JSON output — full RFC 8259 §6: `"` and `\` get
+--- backslash escapes, the named controls `\b \t \n \f \r` get their
+--- short escapes, and every OTHER char below U+0020 becomes `\u00XX`
+--- (a raw control byte in the output would be invalid JSON). Chars
+--- ≥ U+0020 — including non-ASCII — emit literally.
+---
+--- Char-walking `while` (the old `str.replace` chain couldn't reach
+--- the 27 unnamed control chars): `char.code_point` returns a Number
+--- the checker compares directly, so `cp == 34` / `cp < 32` typecheck
+--- even though other host results stay `type.unknown`.
+--- `hex_dig` renders one hex digit (0–15 → '0'–'9'/'A'–'F') for the
+--- `\u00XX` tail.
+hex_dig := d ~> char.from_code_point(if d < 10 { 48 + d } else { 55 + d })
+
+--- High nibble of a value < 32 (0 or 1) — an arrow, not an inline `if`,
+--- because an `if`-expr producing Numbers inside a call arg trips the
+--- checker's arg-position typing.
+nib := n ~> if n < 16 { 0 } else { 1 }
+
+--- Two hex digits for a value in 0–31 (only ever fed cp < 32).
+hex2 := n ~> str.concat(hex_dig(nib(n)), hex_dig(n - nib(n) * 16))
+
+--- The escaped spelling of one char: named controls get short escapes,
+--- every other char below U+0020 becomes `\u00XX`, everything else
+--- emits literally.
+esc_char := (cp, c) ~> if cp == 34 { uw_s("\\\"") } else {
+  if cp == 92 { uw_s("\\\\") } else {
+  if cp == 8 { uw_s("\\b") } else {
+  if cp == 9 { uw_s("\\t") } else {
+  if cp == 10 { uw_s("\\n") } else {
+  if cp == 12 { uw_s("\\f") } else {
+  if cp == 13 { uw_s("\\r") } else {
+  if cp < 32 { str.concat("\\u00", hex2(cp)) } else { c } } } } } } } }
+
+esc := s ~> while { cs: char.chars(s), out: uw_s("") } {
+  (st) ~> match st.cs {
+    []: { out: st.out },
+    [c, ...t]: { state: { cs: t, out: str.concat(st.out, esc_char(char.code_point(c), c)) } }
+  }
+}
 
 --- emit-action builders: reversed-for-stack per item; all actions
 --- carry the full {k, x, s, ind} field set (unused slots hold unknown
@@ -341,9 +372,27 @@ hex_d := c ~> match c {
 }
 hex4 := (a, b, c, d) ~> hex_d(a) * 4096 + hex_d(b) * 256 + hex_d(c) * 16 + hex_d(d)
 
+--- hex-digit membership for `\uXXXX` validation — `hex_d`'s `_: 0`
+--- default would silently decode `\uZZZZ` to NUL without this gate.
+is_hex := c ~> match c {
+  "0": true, "1": true, "2": true, "3": true, "4": true,
+  "5": true, "6": true, "7": true, "8": true, "9": true,
+  "a": true, "b": true, "c": true, "d": true, "e": true, "f": true,
+  "A": true, "B": true, "C": true, "D": true, "E": true, "F": true,
+  _: false
+}
+
+--- legal single-char escapes (RFC 8259 §7): the short escapes plus
+--- `\"` `\\` `\/`; `u` is handled by mode "u" before this gate.
+esc_ok := c ~> match c {
+  "\"": true, "\\": true, "/": true,
+  "b": true, "f": true, "n": true, "r": true, "t": true, _: false
+}
+
 --- single-char escape decode: `\n`→newline etc. An if/else chain, not
 --- `match` — literal vs `type.unknown` arms don't unify even inside a
---- `while` island.
+--- `while` island. Only reached for `esc_ok` chars, so the fallthrough
+--- `c` covers exactly `"` `\` `/` (all identity decodes).
 esc_in := c ~> while { q: null } { (q) ~> { out: do {
   if c == "n" { "\n" } else {
   if c == "t" { "\t" } else {
@@ -351,6 +400,47 @@ esc_in := c ~> while { q: null } { (q) ~> { out: do {
   if c == "b" { char.from_code_point(8) } else {
   if c == "f" { char.from_code_point(12) } else { c } } } } }
 } } }
+
+--- digit / exponent-char classes for the number DFA below.
+is_dig := c ~> match c {
+  "0": true, "1": true, "2": true, "3": true, "4": true,
+  "5": true, "6": true, "7": true, "8": true, "9": true, _: false
+}
+is_exp := c ~> match c { "e": true, "E": true, _: false }
+
+--- RFC 8259 number grammar as a DFA over the char list:
+---   -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+--- `class_num` is only a *candidate* charset — this validates the
+--- actual grammar, rejecting `+1`, `01`, `1.`, `.5`, `1e`, `1e+`,
+--- `--1`, `1+2` etc. State is a string tag; "s9" is the dead state.
+--- Accept states at end-of-input: "s2" (int digits), "s3" (leading
+--- zero complete), "s5" (frac digits), "s8" (exp digits).
+valid_num := s ~> while { cs: char.chars(s), st: "s0" } {
+  (q) ~> match q.cs {
+    []: { out: match q.st { "s2": true, "s3": true, "s5": true, "s8": true, _: false } },
+    [c, ...t]: { state: { cs: t, st: match q.st {
+      "s0": if c == "-" { "s1" } else { if is_dig(c) { if c == "0" { "s3" } else { "s2" } } else { "s9" } },
+      "s1": if c == "0" { "s3" } else { if is_dig(c) { "s2" } else { "s9" } },
+      "s2": if is_dig(c) { "s2" } else { if c == "." { "s4" } else { if is_exp(c) { "s6" } else { "s9" } } },
+      "s3": if c == "." { "s4" } else { if is_exp(c) { "s6" } else { "s9" } },
+      "s4": if is_dig(c) { "s5" } else { "s9" },
+      "s5": if is_dig(c) { "s5" } else { if is_exp(c) { "s6" } else { "s9" } },
+      "s6": if c == "+" || c == "-" { "s7" } else { if is_dig(c) { "s8" } else { "s9" } },
+      "s7": if is_dig(c) { "s8" } else { "s9" },
+      "s8": if is_dig(c) { "s8" } else { "s9" },
+      _: "s9"
+    } } }
+  }
+}
+
+--- number-token flush with RFC 8259 grammar validation — `class_num`
+--- only collects candidate chars; `valid_num` decides. Invalid input
+--- becomes an error token at the number's start position.
+num_tok := (buf, ti) ~> if valid_num(buf) {
+  mk_tok("v", mk_jnum(typeof.to_number(buf)), ti)
+} else {
+  mk_tok("e", mk_jstr(str.concat("bad number ", buf)), ti)
+}
 
 --- the literal-token flush: "true"/"false"/"null" emit their Json;
 --- anything else is a bad-literal error at position ti.
@@ -371,7 +461,7 @@ lit_tok := (buf, ti) ~> match buf {
 tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf: uw_s(""), bh: "", hc: 0 } {
   (st) ~> match st.cs {
     []: if st.mode == "d" {
-      { out: [...st.acc, mk_tok("v", mk_jnum(typeof.to_number(st.buf)), uw_n(st.ti))] }
+      { out: [...st.acc, num_tok(st.buf, uw_n(st.ti))] }
     } else {
       if st.mode == "a" {
         { out: [...st.acc, lit_tok(st.buf, st.ti)] }
@@ -387,24 +477,77 @@ tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf
       match c {
         "\"": { state: { cs: t, acc: [...st.acc, mk_tok("v", mk_jstr(st.buf), uw_n(st.ti))], i: st.i + 1, ti: st.ti, mode: "n", buf: st.buf, bh: st.bh, hc: st.hc } },
         "\\": { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "e", buf: st.buf, bh: st.bh, hc: st.hc } },
-        _: { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, c), bh: st.bh, hc: st.hc } }
+        _: do {
+          cp := char.code_point(c)
+          if cp < 32 {
+            --- RFC 8259: raw control chars must be escaped in strings
+            { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("control character in string"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
+          } else {
+            { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, c), bh: st.bh, hc: st.hc } }
+          }
+        }
       }
     } else {
       if st.mode == "e" {
         if c == "u" {
           { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "u", buf: st.buf, bh: "", hc: 0 } }
         } else {
-          { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, esc_in(c)), bh: st.bh, hc: st.hc } }
+          if esc_ok(c) {
+            { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, esc_in(c)), bh: st.bh, hc: st.hc } }
+          } else {
+            --- RFC 8259: only the listed escapes are legal after `\`
+            { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("invalid escape"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
+          }
         }
       } else {
         if st.mode == "u" {
           if st.hc == 3 {
-            match char.chars(str.concat(st.bh, c)) {
-              [h1, h2, h3, h4]: { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, char.from_code_point(math.floor(hex4(h1, h2, h3, h4)))), bh: "", hc: 0 } },
-              _: { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: st.buf, bh: "", hc: 0 } }
+            if is_hex(c) {
+              match char.chars(str.concat(st.bh, c)) {
+                [h1, h2, h3, h4]: do {
+                  hv := hex4(h1, h2, h3, h4)
+                  if hv < 55296 || hv > 57343 {
+                    --- BMP scalar (or >U+FFFF can't occur — \uXXXX max FFFF)
+                    { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "s", buf: str.concat(st.buf, char.from_code_point(math.floor(hv))), bh: "", hc: 0 } }
+                  } else {
+                    if hv < 56320 {
+                      --- high surrogate D800–DBFF: the next six input
+                      --- chars must be `\u` + a low surrogate DC00–DFFF
+                      --- (lookahead on `t`, no new modes needed)
+                      match t {
+                        ["\\", "u", a2, b2, c2, d2, ...rest2]:
+                          if is_hex(a2) && is_hex(b2) && is_hex(c2) && is_hex(d2) {
+                            do {
+                              lv := hex4(a2, b2, c2, d2)
+                              if lv < 56320 || lv > 57343 {
+                                { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("invalid surrogate pair"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: "", hc: 0 } }
+                              } else {
+                                cp2 := 65536 + (hv - 55296) * 1024 + (lv - 56320)
+                                { state: { cs: rest2, acc: st.acc, i: st.i + 7, ti: st.ti, mode: "s", buf: str.concat(st.buf, char.from_code_point(math.floor(cp2))), bh: "", hc: 0 } }
+                              }
+                            }
+                          } else {
+                            { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("bad hex escape"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: "", hc: 0 } }
+                          },
+                        _: { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("lone surrogate"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: "", hc: 0 } }
+                      }
+                    } else {
+                      --- lone low surrogate DC00–DFFF
+                      { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("lone surrogate"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: "", hc: 0 } }
+                    }
+                  }
+                },
+                _: { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("bad hex escape"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: "", hc: 0 } }
+              }
+            } else {
+              { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("bad hex escape"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
             }
           } else {
-            { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "u", buf: st.buf, bh: str.concat(st.bh, c), hc: st.hc + 1 } }
+            if is_hex(c) {
+              { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "u", buf: st.buf, bh: str.concat(st.bh, c), hc: st.hc + 1 } }
+            } else {
+              { state: { cs: t, acc: [...st.acc, mk_tok("e", mk_jstr("bad hex escape"), uw_n(st.i))], i: st.i + 1, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
+            }
           }
         } else {
           if st.mode == "d" {
@@ -412,7 +555,7 @@ tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf
               { state: { cs: t, acc: st.acc, i: st.i + 1, ti: st.ti, mode: "d", buf: str.concat(st.buf, c), bh: st.bh, hc: st.hc } }
             } else {
               --- flush number, reprocess c in mode "n"
-              { state: { cs: st.cs, acc: [...st.acc, mk_tok("v", mk_jnum(typeof.to_number(st.buf)), uw_n(st.ti))], i: st.i, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
+              { state: { cs: st.cs, acc: [...st.acc, num_tok(st.buf, uw_n(st.ti))], i: st.i, ti: st.ti, mode: "n", buf: "", bh: st.bh, hc: st.hc } }
             }
           } else {
             if st.mode == "a" {
@@ -793,6 +936,116 @@ smoke_all := [
   runState_c(demo_chain, uw_n(5)),
   runState_c(p_getc, while { d2: null } { (q2) ~> { out: { pos: 0, src: "hi" } } })
 ]
+
+-- ------------------------------------------------------------------------
+-- RFC 8259 conformance tests — run with `hnl test src/json.hnl` (the
+-- `json.test.hnl` symlink makes `hnl test src/*.test.hnl` pick them up).
+-- They live in this file, not a sibling `.test.hnl`, because
+-- `import * as` cannot consume this module at all: the top-level
+-- generator-record family declarations (`Json`/`PErr`/`Result`) poison
+-- the module env record — every bound name comes back non-arrow
+-- ("callee is not an arrow-value"). That is a host/module-loader bug,
+-- not fixable here; inside the file the ctor names are in scope, so
+-- the suite asserts directly on `parse`/`toStr`/`pretty`.
+--
+-- Assertion helpers: `is_err`/`is_ok` discriminate the Result ctors;
+-- `jstr_s` projects a JStr payload's string; `res_s` decodes a string
+-- parse to its chars or "ERR:<msg>".
+-- ------------------------------------------------------------------------
+
+is_ok := r ~> match r { Ok(v): true, Err(e): false }
+is_err := r ~> match r { Ok(v): false, Err(e): true }
+jstr_s := j ~> match j { JStr(s): s, _: "" }
+res_s := r ~> match r { Ok(v): jstr_s(v), Err(e): str.concat("ERR:", e.msg) }
+
+--- every legal short escape decodes to its control char / literal
+test_esc_quote := assert res_s(parse("\"a\\\"b\"")) = "a\"b"
+test_esc_backslash := assert res_s(parse("\"a\\\\b\"")) = "a\\b"
+test_esc_solidus := assert res_s(parse("\"a\\/b\"")) = "a/b"
+test_esc_b := assert res_s(parse("\"a\\bb\"")) = str.concat("a", str.concat(char.from_code_point(8), "b"))
+test_esc_f := assert res_s(parse("\"a\\fb\"")) = str.concat("a", str.concat(char.from_code_point(12), "b"))
+test_esc_n := assert res_s(parse("\"a\\nb\"")) = "a\nb"
+test_esc_r := assert res_s(parse("\"a\\rb\"")) = "a\rb"
+test_esc_t := assert res_s(parse("\"a\\tb\"")) = "a\tb"
+
+--- \uXXXX: BMP scalar, lowercase hex, and a surrogate pair combining to
+--- U+1F600
+test_uni_bmp := assert res_s(parse("\"\\u0041BC\"")) = "ABC"
+test_uni_lower := assert res_s(parse("\"\\u00e9\"")) = "é"
+test_uni_pair := assert res_s(parse("\"\\uD83D\\uDE00\"")) = char.from_code_point(128512)
+test_uni_pair_mixed := assert res_s(parse("\"x\\uD83D\\uDE00y\"")) = str.concat("x", str.concat(char.from_code_point(128512), "y"))
+
+--- invalid escapes / bad hex / bad surrogate forms are all rejected
+test_bad_esc_x := assert is_err(parse("\"\\x\""))
+test_bad_esc_q := assert is_err(parse("\"a\\qb\""))
+test_bad_esc_0 := assert is_err(parse("\"\\0\""))
+test_bad_hex_zz := assert is_err(parse("\"\\uZZZZ\""))
+test_bad_hex_short := assert is_err(parse("\"\\u12\""))
+test_bad_hex_g := assert is_err(parse("\"\\u12G4\""))
+test_bad_hex_eof := assert is_err(parse("\"\\u004"))
+test_lone_high := assert is_err(parse("\"\\uD800\""))
+test_lone_high_eof := assert is_err(parse("\"\\uD83D\\uDE0"))
+test_lone_low := assert is_err(parse("\"\\uDC00\""))
+test_lone_high_then_char := assert is_err(parse("\"\\uD800x\""))
+test_lone_high_then_bmp := assert is_err(parse("\"\\uD800\\u0041\""))
+test_lone_high_then_high := assert is_err(parse("\"\\uD800\\uD800\""))
+test_lone_high_then_low_badhex := assert is_err(parse("\"\\uD800\\uZZZZ\""))
+
+--- raw control characters inside a string literal are rejected
+--- (built dynamically — .hnl literals can't carry raw control bytes)
+ctl_soh := str.concat(str.concat("\"a", char.from_code_point(1)), "b\"")
+ctl_tab := str.concat("\"a", str.concat("\t", "b\""))
+ctl_nl := str.concat("\"a", str.concat("\n", "b\""))
+test_ctl_soh := assert is_err(parse(ctl_soh))
+test_ctl_tab := assert is_err(parse(ctl_tab))
+test_ctl_nl := assert is_err(parse(ctl_nl))
+
+--- stringify escapes: every char below U+0020 gets a JSON escape —
+--- named controls get short forms, the rest get \u00XX
+test_st_quote := assert toStr(mk_jstr("a\"b")) = "\"a\\\"b\""
+test_st_backslash := assert toStr(mk_jstr("a\\b")) = "\"a\\\\b\""
+test_st_n := assert toStr(mk_jstr("a\nb")) = "\"a\\nb\""
+test_st_t := assert toStr(mk_jstr("a\tb")) = "\"a\\tb\""
+test_st_r := assert toStr(mk_jstr("a\rb")) = "\"a\\rb\""
+test_st_b := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(8), "b")))) = "\"a\\bb\""
+test_st_f := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(12), "b")))) = "\"a\\fb\""
+test_st_soh := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(1), "b")))) = "\"a\\u0001b\""
+test_st_us := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(31), "b")))) = "\"a\\u001fb\""
+test_st_nonascii := assert toStr(mk_jstr("héllo")) = "\"héllo\""
+test_st_del := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(127), "b")))) = str.concat("\"a", str.concat(char.from_code_point(127), "b\""))
+
+--- escape round-trips: parse(toStr(x)) preserves the string
+test_rt_all := assert res_s(parse(toStr(mk_jstr(str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z"))))))) = str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z")))
+test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Ok(v): toStr(v) = "{\"k\\\"y\":\"v\\nv\"}", Err(e): false }
+
+--- number grammar: RFC 8259 rejects everything `class_num` over-collects
+test_num_ok_0 := assert is_ok(parse("0"))
+test_num_ok_neg0 := assert is_ok(parse("-0"))
+test_num_ok_int := assert is_ok(parse("42"))
+test_num_ok_frac := assert is_ok(parse("1.5"))
+test_num_ok_lead0frac := assert is_ok(parse("0.5"))
+test_num_ok_exp := assert is_ok(parse("1e5"))
+test_num_ok_exp2 := assert is_ok(parse("-1.5e-3"))
+test_num_ok_exp_upper := assert is_ok(parse("2E+7"))
+test_num_bad_plus := assert is_err(parse("+1"))
+test_num_bad_lead0 := assert is_err(parse("01"))
+test_num_bad_dot := assert is_err(parse("1."))
+test_num_bad_leaddot := assert is_err(parse(".5"))
+test_num_bad_exp := assert is_err(parse("1e"))
+test_num_bad_expsign := assert is_err(parse("1e+"))
+test_num_bad_ddash := assert is_err(parse("--1"))
+test_num_bad_plusmid := assert is_err(parse("1+2"))
+test_num_bad_dash := assert is_err(parse("-"))
+test_num_bad_dotonly := assert is_err(parse("."))
+test_num_bad_trail0 := assert is_err(parse("10x"))
+test_num_bad_inarr := assert is_err(parse("[01]"))
+test_num_ok_inarr := assert is_ok(parse("[0, -1.5e2]"))
+
+--- existing strictness still holds alongside the new checks
+test_lit_still_bad := assert is_err(parse("nul"))
+test_trail_still_bad := assert is_err(parse("[1,]"))
+test_unterm_still_bad := assert is_err(parse("\"abc"))
+test_ws_ok := assert is_ok(parse("  [ 1 , 2 ]  "))
 
 -- Module record — the file's `hnl run` result. NOT the import surface:
 -- `import * as j` binds the module env (all top-level `:=` names —
