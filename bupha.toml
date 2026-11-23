@@ -6,7 +6,7 @@
 
 [[repos]]
 name = "handl-lang/lib-json-handl"
-dir = "/home/luis/GitHub/handl-lang/lib-json-handl"
+dir = "~//GitHub/handl-lang/lib-json-handl"
 branch = "refs/heads/main"
   [repos.runner]
   kind = "script"
