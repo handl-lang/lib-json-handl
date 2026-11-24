@@ -157,7 +157,7 @@ mk_frm := (k, items, key, ph) ~> while { d: null } { (q) ~> { out: { k: k, items
 -- bytecode/cranelift still diverge on self-recursive closures).
 -- ------------------------------------------------------------------------
 
-jfirst_scalar : Json ~> Json = j ~> match j {
+jfirst_scalar : Json ~> Json := j ~> match j {
   JArr(xs): match xs { []: j, [h, ...t]: jfirst_scalar(h) },
   JObj(kvs): match kvs { []: j, [[k, v], ...t]: jfirst_scalar(v) },
   _: j
@@ -959,21 +959,21 @@ jstr_s := j ~> match j { JStr(s): s, _: "" }
 res_s := r ~> match r { Ok(v): jstr_s(v), Err(e): str.concat("ERR:", e.msg) }
 
 --- every legal short escape decodes to its control char / literal
-test_esc_quote := assert res_s(parse("\"a\\\"b\"")) = "a\"b"
-test_esc_backslash := assert res_s(parse("\"a\\\\b\"")) = "a\\b"
-test_esc_solidus := assert res_s(parse("\"a\\/b\"")) = "a/b"
-test_esc_b := assert res_s(parse("\"a\\bb\"")) = str.concat("a", str.concat(char.from_code_point(8), "b"))
-test_esc_f := assert res_s(parse("\"a\\fb\"")) = str.concat("a", str.concat(char.from_code_point(12), "b"))
-test_esc_n := assert res_s(parse("\"a\\nb\"")) = "a\nb"
-test_esc_r := assert res_s(parse("\"a\\rb\"")) = "a\rb"
-test_esc_t := assert res_s(parse("\"a\\tb\"")) = "a\tb"
+test_esc_quote := assert res_s(parse("\"a\\\"b\"")) == "a\"b"
+test_esc_backslash := assert res_s(parse("\"a\\\\b\"")) == "a\\b"
+test_esc_solidus := assert res_s(parse("\"a\\/b\"")) == "a/b"
+test_esc_b := assert res_s(parse("\"a\\bb\"")) == str.concat("a", str.concat(char.from_code_point(8), "b"))
+test_esc_f := assert res_s(parse("\"a\\fb\"")) == str.concat("a", str.concat(char.from_code_point(12), "b"))
+test_esc_n := assert res_s(parse("\"a\\nb\"")) == "a\nb"
+test_esc_r := assert res_s(parse("\"a\\rb\"")) == "a\rb"
+test_esc_t := assert res_s(parse("\"a\\tb\"")) == "a\tb"
 
 --- \uXXXX: BMP scalar, lowercase hex, and a surrogate pair combining to
 --- U+1F600
-test_uni_bmp := assert res_s(parse("\"\\u0041BC\"")) = "ABC"
-test_uni_lower := assert res_s(parse("\"\\u00e9\"")) = "é"
-test_uni_pair := assert res_s(parse("\"\\uD83D\\uDE00\"")) = char.from_code_point(128512)
-test_uni_pair_mixed := assert res_s(parse("\"x\\uD83D\\uDE00y\"")) = str.concat("x", str.concat(char.from_code_point(128512), "y"))
+test_uni_bmp := assert res_s(parse("\"\\u0041BC\"")) == "ABC"
+test_uni_lower := assert res_s(parse("\"\\u00e9\"")) == "é"
+test_uni_pair := assert res_s(parse("\"\\uD83D\\uDE00\"")) == char.from_code_point(128512)
+test_uni_pair_mixed := assert res_s(parse("\"x\\uD83D\\uDE00y\"")) == str.concat("x", str.concat(char.from_code_point(128512), "y"))
 
 --- invalid escapes / bad hex / bad surrogate forms are all rejected
 test_bad_esc_x := assert is_err(parse("\"\\x\""))
@@ -1002,21 +1002,21 @@ test_ctl_nl := assert is_err(parse(ctl_nl))
 
 --- stringify escapes: every char below U+0020 gets a JSON escape —
 --- named controls get short forms, the rest get \u00XX
-test_st_quote := assert toStr(mk_jstr("a\"b")) = "\"a\\\"b\""
-test_st_backslash := assert toStr(mk_jstr("a\\b")) = "\"a\\\\b\""
-test_st_n := assert toStr(mk_jstr("a\nb")) = "\"a\\nb\""
-test_st_t := assert toStr(mk_jstr("a\tb")) = "\"a\\tb\""
-test_st_r := assert toStr(mk_jstr("a\rb")) = "\"a\\rb\""
-test_st_b := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(8), "b")))) = "\"a\\bb\""
-test_st_f := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(12), "b")))) = "\"a\\fb\""
-test_st_soh := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(1), "b")))) = "\"a\\u0001b\""
-test_st_us := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(31), "b")))) = "\"a\\u001fb\""
-test_st_nonascii := assert toStr(mk_jstr("héllo")) = "\"héllo\""
-test_st_del := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(127), "b")))) = str.concat("\"a", str.concat(char.from_code_point(127), "b\""))
+test_st_quote := assert toStr(mk_jstr("a\"b")) == "\"a\\\"b\""
+test_st_backslash := assert toStr(mk_jstr("a\\b")) == "\"a\\\\b\""
+test_st_n := assert toStr(mk_jstr("a\nb")) == "\"a\\nb\""
+test_st_t := assert toStr(mk_jstr("a\tb")) == "\"a\\tb\""
+test_st_r := assert toStr(mk_jstr("a\rb")) == "\"a\\rb\""
+test_st_b := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(8), "b")))) == "\"a\\bb\""
+test_st_f := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(12), "b")))) == "\"a\\fb\""
+test_st_soh := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(1), "b")))) == "\"a\\u0001b\""
+test_st_us := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(31), "b")))) == "\"a\\u001fb\""
+test_st_nonascii := assert toStr(mk_jstr("héllo")) == "\"héllo\""
+test_st_del := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_point(127), "b")))) == str.concat("\"a", str.concat(char.from_code_point(127), "b\""))
 
 --- escape round-trips: parse(toStr(x)) preserves the string
-test_rt_all := assert res_s(parse(toStr(mk_jstr(str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z"))))))) = str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z")))
-test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Ok(v): toStr(v) = "{\"k\\\"y\":\"v\\nv\"}", Err(e): false }
+test_rt_all := assert res_s(parse(toStr(mk_jstr(str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z"))))))) == str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z")))
+test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Ok(v): toStr(v) := "{\"k\\\"y\":\"v\\nv\"}", Err(e): false }
 
 --- number grammar: RFC 8259 rejects everything `class_num` over-collects
 test_num_ok_0 := assert is_ok(parse("0"))
