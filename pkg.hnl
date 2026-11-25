@@ -1,1 +1,1 @@
-{ modules: ["json"], description: "JSON parser/serializer written in handl itself.", license: "MIT" }
+{ modules: ["json"], name: "json-handl", description: "JSON parser/serializer written in handl itself.", license: "MIT" }
