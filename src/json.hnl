@@ -92,24 +92,6 @@ Result<e : Type, a : Type> := new Inductive {
   Ok : (v : a) ~> Result
 }
 
--- ------------------------------------------------------------------------
--- Export surface. Bare `export <name>[, <name>…]` lists re-export the
--- top-level `:=` bindings they name (same surface as `export sort, cons`
--- in arrow modules, ADR-0069) — star and named imports now bind exactly
--- these names instead of the whole module env. `export smoke := …`
--- keeps the `smoke` alias the trailing record used to expose.
--- `data`-family ctor names still can't cross `import` (G5): consumers
--- mint values via the `mk_*` factories or redeclare the families
--- locally (`sym.seeded` handles are content-stable).
--- ------------------------------------------------------------------------
-
-export Json, PErr, Result, toStr, pretty, parse, parse_st, runState,
-  runState_c, run_parse, jfirst_scalar, p_getc, mk_io, chain_get, chain_put,
-  chain_ret, mk_jnull, mk_jbool, mk_jnum, mk_jstr, mk_jarr, mk_jobj,
-  mk_ok, mk_err, mk_perr, is_ok, is_err
--- (`export smoke := smoke_all` sits after `smoke_all`'s binding —
--- export bindings evaluate in source order.)
-
 --- State(s) — the approved signature (option A): get reads the state,
 --- put replaces it. As a typed IO sig it spells
 ---   IO<{get: Unit ~> s, put: s ~> Unit}>
@@ -203,7 +185,7 @@ jfirst_scalar : Json ~> Json := j ~> match j {
 --- even though other host results stay `type.unknown`.
 --- `hex_dig` renders one hex digit (0–15 → '0'–'9'/'A'–'F') for the
 --- `\u00XX` tail.
-hex_dig := d ~> char.from_code_point(if d < 10 { 48 + d } else { 55 + d })
+hex_dig := d ~> if d < 10 { char.from_code_point(48 + d) } else { char.from_code_point(55 + d) }
 
 --- High nibble of a value < 32 (0 or 1) — an arrow, not an inline `if`,
 --- because an `if`-expr producing Numbers inside a call arg trips the
@@ -478,7 +460,7 @@ lit_tok := (buf, ti) ~> match buf {
 --- alpha run. A mode seeing a non-member char flushes its token and
 --- REPROCESSES the char by keeping `cs` unconsumed. `i` counts chars
 --- consumed, `ti` the current token's start.
-tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf: uw_s(""), bh: "", hc: 0 } {
+tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf: uw_s(""), bh: uw_s(""), hc: 0 } {
   (st) ~> match st.cs {
     []: if st.mode == "d" {
       { out: [...st.acc, num_tok(st.buf, uw_n(st.ti))] }
@@ -780,7 +762,13 @@ parse := s ~> while { d: null } { (d) ~> { out: do {
       } else {
         mk_ok(r.val)
       },
-      _: mk_err(mk_perr(char.length(s), "unclosed container"))
+      _: do {
+        --- `char.length(s)` can't sit in call-arg position (the
+        --- checker's arg-position typing rejects host calls there) —
+        --- hoist it into a `do` binding first.
+        n := char.length(s)
+        mk_err(mk_perr(n, "unclosed container"))
+      }
     }
   } else {
     mk_err(mk_perr(r.errp, r.err))
@@ -838,7 +826,7 @@ runState := (f, s0) ~> while { d: null } { (d) ~> { out: do {
 --- first call's record shape.
 parse_st := s ~> while { d: null } { (d) ~> { out: do {
   r := parse(s)
-  sig := { get: null, put: match r { Ok(v): char.length(s), Err(e): match e { PErr(p, m): p, _: 0 } }, result: r }
+  sig := { get: null, put: match r { Ok(v): char.length(s), Err(e): match e { PErr(p, m): do { ep := while { d: null } { (q) ~> { out: e } }; ep.pos }, _: 0 } }, result: r }
   {"__former__": sym.seeded("type.io"), "indices": [sig]}
 } } }
 
@@ -934,19 +922,19 @@ smoke_all := [
   match parse("{}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
   match parse("[]") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
   match parse("{\"a\":{\"b\":{\"c\":[{}]}}}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("xyz") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("xyz") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
   match parse("nul") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
   match parse("truex") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1,2") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("[1,2") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
   match parse("}") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
   match parse("[1}]") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1] 2") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("[1] 2") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
   match parse("   ") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1 2]") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("[1,]") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("[1 2]") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("[1,]") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
   match parse("{,}") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("\"abc") { Err(e): match e { PErr(p, m): m, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("\"abc") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
   pretty(mk_jobj([["a", mk_jarr([mk_jnum(1)])]])),
   pretty(mk_jarr([])),
   pretty(mk_jobj([["x", mk_jbool(true)], ["y", mk_jnull]])),
@@ -973,7 +961,15 @@ smoke_all := [
 is_ok := r ~> match r { Ok(v): true, Err(e): false }
 is_err := r ~> match r { Ok(v): false, Err(e): true }
 jstr_s := j ~> match j { JStr(s): s, _: "" }
-res_s := r ~> match r { Ok(v): jstr_s(v), Err(e): str.concat("ERR:", e.msg) }
+res_s := r ~> match r { Ok(v): jstr_s(v), Err(e): do {
+  --- `e`'s static type is `Result`'s `e` type param (opaque `Type`),
+  --- so `e.msg` fails the checker; force it to `type.unknown` via a
+  --- trivial `while` first — field access on unknown yields unknown.
+  --- (Not `uw_r`: `:=` params pin at the first call site — `uw_r`'s
+  --- is the `noval` record shape.)
+  eu := while { d: null } { (q) ~> { out: e } }
+  str.concat("ERR:", eu.msg)
+} }
 
 --- every legal short escape decodes to its control char / literal
 test_esc_quote := assert res_s(parse("\"a\\\"b\"")) == "a\"b"
@@ -1033,7 +1029,7 @@ test_st_del := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_po
 
 --- escape round-trips: parse(toStr(x)) preserves the string
 test_rt_all := assert res_s(parse(toStr(mk_jstr(str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z"))))))) == str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z")))
-test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Ok(v): toStr(v) := "{\"k\\\"y\":\"v\\nv\"}", Err(e): false }
+test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Ok(v): toStr(v) == "{\"k\\\"y\":\"v\\nv\"}", Err(e): false }
 
 --- number grammar: RFC 8259 rejects everything `class_num` over-collects
 test_num_ok_0 := assert is_ok(parse("0"))
@@ -1064,12 +1060,31 @@ test_trail_still_bad := assert is_err(parse("[1,]"))
 test_unterm_still_bad := assert is_err(parse("\"abc"))
 test_ws_ok := assert is_ok(parse("  [ 1 , 2 ]  "))
 
--- `smoke` keeps the alias the record below exposes; it must sit after
--- `smoke_all`'s binding (export bindings evaluate in source order).
+-- ------------------------------------------------------------------------
+-- Export surface. Bare `export <name>[, <name>…]` lists re-export the
+-- top-level `:=` bindings they name (same surface as `export sort, cons`
+-- in arrow modules, ADR-0069) — star and named imports now bind exactly
+-- these names instead of the whole module env. `export smoke := …`
+-- keeps the `smoke` alias the trailing record used to expose.
+-- `data`-family ctor names still can't cross `import` (G5): consumers
+-- mint values via the `mk_*` factories or redeclare the families
+-- locally (`sym.seeded` handles are content-stable).
+--
+-- Export bindings evaluate in source order, so every name the lists
+-- below name must already be bound: they sit after ALL exported
+-- definitions (this is why the block lives at the bottom, not the top).
+-- ------------------------------------------------------------------------
+
+export Json, PErr, Result, toStr, pretty, parse, parse_st, runState,
+  runState_c, run_parse, jfirst_scalar, p_getc, mk_io, chain_get, chain_put,
+  chain_ret, mk_jnull, mk_jbool, mk_jnum, mk_jstr, mk_jarr, mk_jobj,
+  mk_ok, mk_err, mk_perr, is_ok, is_err
+
+-- `smoke` keeps the alias the record below exposes.
 export smoke := smoke_all
 
 -- Module record — the file's `hnl run` result and API documentation.
--- The import surface is the `export` decls near the top: star/named
+-- The import surface is the `export` decls above: star/named
 -- imports bind exactly those names, so internals (`tok_step`,
 -- `build_step`, the `test_*` suite, the `Json`/`PErr`/`Result` family
 -- records) stay file-local. `data` ctor names can't cross `import`:
