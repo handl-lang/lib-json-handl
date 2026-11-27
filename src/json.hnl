@@ -74,7 +74,7 @@
 -- Types — the checked surface
 -- ------------------------------------------------------------------------
 
-Json := {
+Json := new Inductive {
   JNull : Json,
   JBool : (b : Bool) ~> Json,
   JNum : (n : Number) ~> Json,
@@ -83,11 +83,11 @@ Json := {
   JObj : (kvs : [[Str, Json]]) ~> Json
 }
 
-PErr := {
+PErr := new Inductive {
   PErr : (pos : Number, msg : Str) ~> PErr
 }
 
-Result<e : Type, a : Type> := {
+Result<e : Type, a : Type> := new Inductive {
   Err : (e : e) ~> Result,
   Ok : (v : a) ~> Result
 }
@@ -103,9 +103,9 @@ Result<e : Type, a : Type> := {
 -- locally (`sym.seeded` handles are content-stable).
 -- ------------------------------------------------------------------------
 
-export toStr, pretty, parse, parse_st, runState, runState_c, run_parse,
-  jfirst_scalar, p_getc, mk_io, chain_get, chain_put, chain_ret,
-  mk_jnull, mk_jbool, mk_jnum, mk_jstr, mk_jarr, mk_jobj,
+export Json, PErr, Result, toStr, pretty, parse, parse_st, runState,
+  runState_c, run_parse, jfirst_scalar, p_getc, mk_io, chain_get, chain_put,
+  chain_ret, mk_jnull, mk_jbool, mk_jnum, mk_jstr, mk_jarr, mk_jobj,
   mk_ok, mk_err, mk_perr, is_ok, is_err
 -- (`export smoke := smoke_all` sits after `smoke_all`'s binding —
 -- export bindings evaluate in source order.)
