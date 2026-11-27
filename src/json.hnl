@@ -1,15 +1,18 @@
 --- json.hnl — a JSON parser + serializer written in handl itself on the
 --- phase-3 unified type system. Pure-.hnl sibling of lib-json (the
---- C-backed codec): the `data`/`match`/implicit-binder/`IO<sig>` surface
+--- C-backed codec): the inductive/`match`/implicit-binder/`IO<sig>` surface
 --- exercised end to end on a real library, not a test sketch.
 ---
 --- Verified surface (`hnl typecheck src/json.hnl` — clean; `hnl run`
 --- evaluates the smoke block at the bottom):
 ---
----   data Json :: JNull | JBool(b : Bool) | JNum(n : Number) | JStr(s : Str)
----              | JArr(xs : [Json]) | JObj(kvs : [[Str, Json]])
----   data PErr :: PErr(pos : Number, msg : Str)
----   data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
+---   Json := new Inductive {
+---     JNull : Json, JBool : (b : Bool) ~> Json, JNum : (n : Number) ~> Json,
+---     JStr : (s : Str) ~> Json, JArr : (xs : [Json]) ~> Json,
+---     JObj : (kvs : [[Str, Json]]) ~> Json }
+---   PErr := new Inductive { PErr : (pos : Number, msg : Str) ~> PErr }
+---   Result(e : Type, a : Type) := new Inductive {
+---     Err : (e : e) ~> Result(e, a), Ok : (v : a) ~> Result(e, a) }
 ---
 --- CONSUMPTION:
 ---
@@ -23,8 +26,8 @@
 --- file-local. The trailing record literal remains the file's `hnl run`
 --- result / API documentation, not the import surface.
 ---
---- `data` ctor names do NOT cross `import` (G5): consumers mint values
---- via `mk_*` factories, or redeclare `data Json` locally — `sym.seeded`
+--- inductive ctor names do NOT cross `import` (G5): consumers mint values
+--- via `mk_*` factories, or redeclare `Json := new Inductive { … }` locally — `sym.seeded`
 --- handles are content-stable so a redeclared family `match`es the lib's
 --- values. Field access (`.v`, `.e`, `.pos`, `.msg`) needs no ctor names.
 ---
@@ -52,9 +55,10 @@
 ---
 --- REMAINING KNOWN GAPS (see /tmp/json-dogfood-report.md):
 ---
----   * `data` ctors are file-local at runtime (call fails via import —
----     `call_host: 'JNum' not found`); `hnl test` can't run `data`,
----     TRANSITIVELY (a data-free test file fails importing this file).
+---   * inductive ctors are file-local at runtime (call fails via import —
+---     `call_host: 'JNum' not found`); `hnl test` can't run a file
+---     declaring families, TRANSITIVELY (a family-free test file fails
+---     importing this file).
 ---   * `IO<sig>` values can't be CONSTRUCTED in checked code — only
 ---     declared stub bodies produce `Former{type.io}` the checker trusts.
 ---   * `export` re-exports `:=` names via the bare `export <name>[, …]`
@@ -62,7 +66,7 @@
 ---     resolves those decls.
 ---   * Recursion needs `: T =`; mutual recursion impossible; `Unknown`
 ---     in an annotation degrades it to `LamVal` ("callee is not
----     applicable"); `()` isn't a Unit literal; `data J ::` — `J` is the
+---     applicable"); `()` isn't a Unit literal; a ctor named `J` — `J` is the
 ---     eliminator keyword; record literal in call-arg position can hit
 ---     `check_object_record: node has no entries array`.
 ---   * An EXTRA `}` doesn't error at the site — it silently re-nests the
@@ -120,7 +124,7 @@ noval := uw_r({"__ctor__": sym.seeded("json.noval"),
 -- result is `type.unknown`: different ctors carry different payload
 -- fields ({b} vs {} vs {s}), and closed records with different fields
 -- don't unify — unknowns do. Pure data at runtime, import-safe,
--- `match`-dispatches on ctor-name identity like `data` mints.
+-- `match`-dispatches on ctor-name identity like family decls mint.
 -- ------------------------------------------------------------------------
 
 mk_jnull := while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JNull"),
@@ -153,7 +157,7 @@ mk_frm := (k, items, key, ph) ~> while { d: null } { (q) ~> { out: { k: k, items
 
 -- ------------------------------------------------------------------------
 -- Checked recursion — `jfirst_scalar` is the pure-canonical proof that
--- `match` + `: T =` recursion compose on a `data` family: every arm is
+-- `match` + `: T =` recursion compose on an inductive family: every arm is
 -- `Json` (homogeneous), the scrutinee is `Json`, and `kv[1]` projects
 -- the `[Str, Json]` pair. Runs on tree-walk (AST-eval fallback;
 -- bytecode/cranelift still diverge on self-recursive closures).
@@ -894,14 +898,14 @@ handled := (io, s0) ~> handle io with { get: req ~> s0, put: req ~> req }
 
 -- ------------------------------------------------------------------------
 -- Smoke — every result verified by `hnl run` output. `test_*` names are
--- skipped (the `desugar.data` overlay can't run `data` under `hnl test`,
+-- skipped (the `desugar.data` overlay can't run family decls under `hnl test`,
 -- even transitively through an import).
 -- ------------------------------------------------------------------------
 
 --- Assertion discipline under the tightened checker: `chk`'s `g == w`
 --- needs BOTH sides `type.unknown` — expected literals are forced via
 --- `str.concat(…, "")` / `typeof.to_number(…)` / `uw_*`. All produced
---- values ride `mk_*` mints (unknown); `data` ctor calls appear only in
+--- values ride `mk_*` mints (unknown); family ctor calls appear only in
 --- the `jfirst_scalar` line, which is declared `Json ~> Json`.
 smoke_all := [
   toStr(mk_jnull),
@@ -1066,7 +1070,7 @@ test_ws_ok := assert is_ok(parse("  [ 1 , 2 ]  "))
 -- in arrow modules, ADR-0069) — star and named imports now bind exactly
 -- these names instead of the whole module env. `export smoke := …`
 -- keeps the `smoke` alias the trailing record used to expose.
--- `data`-family ctor names still can't cross `import` (G5): consumers
+-- inductive-family ctor names still can't cross `import` (G5): consumers
 -- mint values via the `mk_*` factories or redeclare the families
 -- locally (`sym.seeded` handles are content-stable).
 --
@@ -1087,9 +1091,10 @@ export smoke := smoke_all
 -- The import surface is the `export` decls above: star/named
 -- imports bind exactly those names, so internals (`tok_step`,
 -- `build_step`, the `test_*` suite, the `Json`/`PErr`/`Result` family
--- records) stay file-local. `data` ctor names can't cross `import`:
+-- records) stay file-local. Family ctor names can't cross `import`:
 -- consumers mint via `mk_*` factories (same `__ctor__` shape,
--- `match`-compatible by name) or redeclare `data Json` locally —
+-- `match`-compatible by name) or redeclare `Json := new Inductive { … }`
+-- locally —
 -- `sym.seeded` handles are content-stable across modules.
 -- ------------------------------------------------------------------------
 
