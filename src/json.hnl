@@ -11,16 +11,17 @@
 ---   data PErr :: PErr(pos : Number, msg : Str)
 ---   data Result(e : Type, a : Type) :: Err(e : e) | Ok(v : a)
 ---
---- CONSUMPTION (verified under `hnl run`, dogfood round 3):
+--- CONSUMPTION:
 ---
----   from "./json.hnl" import *            -- binds every top-level name
+---   from "./json.hnl" import *            -- binds the declared exports
 ---   from "./json.hnl" import * as j       -- j.parse, j.toStr, j.mk_jnum, …
----   from "./json.hnl" import parse        -- FAILS: named imports resolve
----                                         -- `export` decls only, and
----                                         -- `export` is unusable (G7).
---- The final record literal is the file's eval result under `hnl run`,
---- not the import surface — `import * as j` binds the module *env*
---- (all top-level `:=` names and helpers included; no visibility control).
+---   from "./json.hnl" import parse        -- named imports resolve the
+---                                         -- `export` decls below.
+--- Star/named imports bind ONLY the declared `export` names (I-007) —
+--- the bare `export <name>[, …]` lists re-export the `:=` bindings, so
+--- internals (`tok_step`, `build_step`, the `test_*` suite, …) stay
+--- file-local. The trailing record literal remains the file's `hnl run`
+--- result / API documentation, not the import surface.
 ---
 --- `data` ctor names do NOT cross `import` (G5): consumers mint values
 --- via `mk_*` factories, or redeclare `data Json` locally — `sym.seeded`
@@ -56,8 +57,9 @@
 ---     TRANSITIVELY (a data-free test file fails importing this file).
 ---   * `IO<sig>` values can't be CONSTRUCTED in checked code — only
 ---     declared stub bodies produce `Former{type.io}` the checker trusts.
----   * `export` can't re-export `:=` names (duplicate binding / dead
----     inside the module), and named `import x` needs `export` decls.
+---   * `export` re-exports `:=` names via the bare `export <name>[, …]`
+---     list form (added with the engine support); named `import x`
+---     resolves those decls.
 ---   * Recursion needs `: T =`; mutual recursion impossible; `Unknown`
 ---     in an annotation degrades it to `LamVal` ("callee is not
 ---     applicable"); `()` isn't a Unit literal; `data J ::` — `J` is the
@@ -89,6 +91,24 @@ Result<e : Type, a : Type> := {
   Err : (e : e) ~> Result,
   Ok : (v : a) ~> Result
 }
+
+-- ------------------------------------------------------------------------
+-- Export surface. Bare `export <name>[, <name>…]` lists re-export the
+-- top-level `:=` bindings they name (same surface as `export sort, cons`
+-- in arrow modules, ADR-0069) — star and named imports now bind exactly
+-- these names instead of the whole module env. `export smoke := …`
+-- keeps the `smoke` alias the trailing record used to expose.
+-- `data`-family ctor names still can't cross `import` (G5): consumers
+-- mint values via the `mk_*` factories or redeclare the families
+-- locally (`sym.seeded` handles are content-stable).
+-- ------------------------------------------------------------------------
+
+export toStr, pretty, parse, parse_st, runState, runState_c, run_parse,
+  jfirst_scalar, p_getc, mk_io, chain_get, chain_put, chain_ret,
+  mk_jnull, mk_jbool, mk_jnum, mk_jstr, mk_jarr, mk_jobj,
+  mk_ok, mk_err, mk_perr, is_ok, is_err
+-- (`export smoke := smoke_all` sits after `smoke_all`'s binding —
+-- export bindings evaluate in source order.)
 
 --- State(s) — the approved signature (option A): get reads the state,
 --- put replaces it. As a typed IO sig it spells
@@ -940,13 +960,10 @@ smoke_all := [
 -- ------------------------------------------------------------------------
 -- RFC 8259 conformance tests — run with `hnl test src/json.hnl` (the
 -- `json.test.hnl` symlink makes `hnl test src/*.test.hnl` pick them up).
--- They live in this file, not a sibling `.test.hnl`, because
--- `import * as` cannot consume this module at all: the top-level
--- generator-record family declarations (`Json`/`PErr`/`Result`) poison
--- the module env record — every bound name comes back non-arrow
--- ("callee is not an arrow-value"). That is a host/module-loader bug,
--- not fixable here; inside the file the ctor names are in scope, so
--- the suite asserts directly on `parse`/`toStr`/`pretty`.
+-- They live in this file, not a sibling `.test.hnl`: `import * as`
+-- binds only the declared `export` names now, and the suite stays
+-- file-local by design — inside the file the ctor names are in scope,
+-- so the suite asserts directly on `parse`/`toStr`/`pretty`.
 --
 -- Assertion helpers: `is_err`/`is_ok` discriminate the Result ctors;
 -- `jstr_s` projects a JStr payload's string; `res_s` decodes a string
@@ -1047,13 +1064,15 @@ test_trail_still_bad := assert is_err(parse("[1,]"))
 test_unterm_still_bad := assert is_err(parse("\"abc"))
 test_ws_ok := assert is_ok(parse("  [ 1 , 2 ]  "))
 
--- Module record — the file's `hnl run` result. NOT the import surface:
--- `import * as j` binds the module env (all top-level `:=` names —
--- `j.parse`, `j.toStr`, `j.mk_jnum`, plus internals like `j.tok_step`;
--- there is no visibility control). Named `import x` wants `export`
--- decls, which can't re-export `:=` names — so the record below
--- exists mainly as the conventional run result + documentation.
--- `data` ctor names stay file-local (they can't cross `import`):
+-- `smoke` keeps the alias the record below exposes; it must sit after
+-- `smoke_all`'s binding (export bindings evaluate in source order).
+export smoke := smoke_all
+
+-- Module record — the file's `hnl run` result and API documentation.
+-- The import surface is the `export` decls near the top: star/named
+-- imports bind exactly those names, so internals (`tok_step`,
+-- `build_step`, the `test_*` suite, the `Json`/`PErr`/`Result` family
+-- records) stay file-local. `data` ctor names can't cross `import`:
 -- consumers mint via `mk_*` factories (same `__ctor__` shape,
 -- `match`-compatible by name) or redeclare `data Json` locally —
 -- `sym.seeded` handles are content-stable across modules.
