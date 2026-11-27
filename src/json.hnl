@@ -7,12 +7,12 @@
 --- evaluates the smoke block at the bottom):
 ---
 ---   Json := new Inductive {
----     JNull : Json, JBool : (b : Bool) ~> Json, JNum : (n : Number) ~> Json,
----     JStr : (s : Str) ~> Json, JArr : (xs : [Json]) ~> Json,
----     JObj : (kvs : [[Str, Json]]) ~> Json }
----   PErr := new Inductive { PErr : (pos : Number, msg : Str) ~> PErr }
+---     jnull : Json, jbool : (b : Bool) ~> Json, jnum : (n : Number) ~> Json,
+---     jstr : (s : Str) ~> Json, jarr : (xs : [Json]) ~> Json,
+---     jobj : (kvs : [[Str, Json]]) ~> Json }
+---   PErr := new Inductive { perr : (pos : Number, msg : Str) ~> PErr }
 ---   Result(e : Type, a : Type) := new Inductive {
----     Err : (e : e) ~> Result(e, a), Ok : (v : a) ~> Result(e, a) }
+---     err : (e : e) ~> Result(e, a), ok : (v : a) ~> Result(e, a) }
 ---
 --- CONSUMPTION:
 ---
@@ -56,7 +56,7 @@
 --- REMAINING KNOWN GAPS (see /tmp/json-dogfood-report.md):
 ---
 ---   * inductive ctors are file-local at runtime (call fails via import —
----     `call_host: 'JNum' not found`); `hnl test` can't run a file
+---     `call_host: 'Json.jnum' not found`); `hnl test` can't run a file
 ---     declaring families, TRANSITIVELY (a family-free test file fails
 ---     importing this file).
 ---   * `IO<sig>` values can't be CONSTRUCTED in checked code — only
@@ -79,21 +79,21 @@
 -- ------------------------------------------------------------------------
 
 Json := new Inductive {
-  JNull : Json,
-  JBool : (b : Bool) ~> Json,
-  JNum : (n : Number) ~> Json,
-  JStr : (s : Str) ~> Json,
-  JArr : (xs : [Json]) ~> Json,
-  JObj : (kvs : [[Str, Json]]) ~> Json
+  jnull : Json,
+  jbool : (b : Bool) ~> Json,
+  jnum : (n : Number) ~> Json,
+  jstr : (s : Str) ~> Json,
+  jarr : (xs : [Json]) ~> Json,
+  jobj : (kvs : [[Str, Json]]) ~> Json
 }
 
 PErr := new Inductive {
-  PErr : (pos : Number, msg : Str) ~> PErr
+  perr : (pos : Number, msg : Str) ~> PErr
 }
 
 Result<e : Type, a : Type> := new Inductive {
-  Err : (e : e) ~> Result,
-  Ok : (v : a) ~> Result
+  err : (e : e) ~> Result,
+  ok : (v : a) ~> Result
 }
 
 --- State(s) — the approved signature (option A): get reads the state,
@@ -127,23 +127,23 @@ noval := uw_r({"__ctor__": sym.seeded("json.noval"),
 -- `match`-dispatches on ctor-name identity like family decls mint.
 -- ------------------------------------------------------------------------
 
-mk_jnull := while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JNull"),
+mk_jnull := while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.jnull"),
                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
-mk_jbool := b ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JBool"), b: b,
+mk_jbool := b ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.jbool"), b: b,
                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
-mk_jnum := n ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JNum"), n: n,
+mk_jnum := n ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.jnum"), n: n,
                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
-mk_jstr := s ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JStr"), s: s,
+mk_jstr := s ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.jstr"), s: s,
                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
-mk_jarr := xs ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JArr"), xs: xs,
+mk_jarr := xs ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.jarr"), xs: xs,
                   "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
-mk_jobj := kvs ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.JObj"), kvs: kvs,
+mk_jobj := kvs ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Json.jobj"), kvs: kvs,
                    "type": {"__former__": sym.seeded("data.Json"), "indices": []}} } }
-mk_ok := v ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Result.Ok"), v: v,
+mk_ok := v ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Result.ok"), v: v,
                "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}} } }
-mk_err := e ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Result.Err"), e: e,
+mk_err := e ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.Result.err"), e: e,
                 "type": {"__former__": sym.seeded("data.Result"), "indices": [null, null]}} } }
-mk_perr := (pos, msg) ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.PErr.PErr"), pos: pos, msg: msg,
+mk_perr := (pos, msg) ~> while { d: null } { (q) ~> { out: {"__ctor__": sym.seeded("data.PErr.perr"), pos: pos, msg: msg,
                           "type": {"__former__": sym.seeded("data.PErr"), "indices": []}} } }
 
 --- record mints — a record literal in array-spread or call-arg
@@ -164,8 +164,8 @@ mk_frm := (k, items, key, ph) ~> while { d: null } { (q) ~> { out: { k: k, items
 -- ------------------------------------------------------------------------
 
 jfirst_scalar : Json ~> Json := j ~> match j {
-  JArr(xs): match xs { []: j, [h, ...t]: jfirst_scalar(h) },
-  JObj(kvs): match kvs { []: j, [[k, v], ...t]: jfirst_scalar(v) },
+  Json.jarr(xs): match xs { []: j, [h, ...t]: jfirst_scalar(h) },
+  Json.jobj(kvs): match kvs { []: j, [[k, v], ...t]: jfirst_scalar(v) },
   _: j
 }
 
@@ -254,12 +254,12 @@ kvs_acts := kvs ~> while { ps: kvs, acc: [], i: 0 } {
 --- One emit step: dispatch on the ctor object by match (runtime
 --- ctor-name discrimination; `match` arms return `{state: …}` records).
 step_v := (x, rest, out) ~> match x {
-  JNull: { state: { stack: rest, out: str.concat(out, "null") } },
-  JBool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
-  JNum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
-  JStr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
-  JArr(xs): { state: { stack: [...items_acts(xs), mk_act("s", noval, str.concat("]", ""), noval), ...rest], out: str.concat(out, "[") } },
-  JObj(kvs): { state: { stack: [...kvs_acts(kvs), mk_act("s", noval, str.concat("}", ""), noval), ...rest], out: str.concat(out, "{") } }
+  Json.jnull: { state: { stack: rest, out: str.concat(out, "null") } },
+  Json.jbool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
+  Json.jnum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
+  Json.jstr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
+  Json.jarr(xs): { state: { stack: [...items_acts(xs), mk_act("s", noval, str.concat("]", ""), noval), ...rest], out: str.concat(out, "[") } },
+  Json.jobj(kvs): { state: { stack: [...kvs_acts(kvs), mk_act("s", noval, str.concat("}", ""), noval), ...rest], out: str.concat(out, "{") } }
 }
 
 toStr := j ~> while { stack: [mk_act("v", j, noval, noval)], out: uw_s("") } {
@@ -311,15 +311,15 @@ pkvs := (kvs, ind) ~> while { ps: kvs, acc: [], i: 0 } {
 }
 
 step_p := (x, ind, rest, out) ~> match x {
-  JNull: { state: { stack: rest, out: str.concat(out, "null") } },
-  JBool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
-  JNum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
-  JStr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
-  JArr(xs): match xs {
+  Json.jnull: { state: { stack: rest, out: str.concat(out, "null") } },
+  Json.jbool(b): { state: { stack: rest, out: str.concat(out, typeof.to_string(b)) } },
+  Json.jnum(n): { state: { stack: rest, out: str.concat(out, typeof.to_string(n)) } },
+  Json.jstr(s): { state: { stack: rest, out: str.concat(str.concat(out, "\""), str.concat(esc(s), "\"")) } },
+  Json.jarr(xs): match xs {
     []: { state: { stack: rest, out: str.concat(out, "[]") } },
     _: { state: { stack: [...pitems(xs, ind), mk_act("s", noval, str.concat("\n", ""), noval), mk_act("s", noval, ind, noval), mk_act("s", noval, str.concat("]", ""), noval), ...rest], out: str.concat(out, "[") } }
   },
-  JObj(kvs): match kvs {
+  Json.jobj(kvs): match kvs {
     []: { state: { stack: rest, out: str.concat(out, "{}") } },
     _: { state: { stack: [...pkvs(kvs, ind), mk_act("s", noval, str.concat("\n", ""), noval), mk_act("s", noval, ind, noval), mk_act("s", noval, str.concat("}", ""), noval), ...rest], out: str.concat(out, "{") } }
   }
@@ -343,7 +343,7 @@ pretty := j ~> while { stack: [mk_act("v", j, noval, uw_s(""))], out: uw_s("") }
 -- Tokens (uniform {k, v, p} shape):
 --   {k:"v", v: Json(unknown), p: pos}    — a completed scalar
 --   {k:"{"|"}"|"["|"]"|":"|",", v: noval, p: pos}
---   {k:"e", v: JStr(msg), p: pos}        — lexer error
+--   {k:"e", v: Json.jstr(msg), p: pos}        — lexer error
 -- `p` is the char offset of the token's first char.
 -- ------------------------------------------------------------------------
 
@@ -605,9 +605,9 @@ tokenize := s ~> while { cs: char.chars(s), acc: [], i: 0, ti: 0, mode: "n", buf
   }
 }
 
---- object keys arrive as `JStr` ctor objects — project the raw string
---- for the `[Str, Json]` pair `JObj` expects.
-key_of := v ~> match v { JStr(s): s, _: "" }
+--- object keys arrive as `Json.jstr` ctor objects — project the raw string
+--- for the `[Str, Json]` pair `Json.jobj` expects.
+key_of := v ~> match v { Json.jstr(s): s, _: "" }
 
 --- may a value (scalar, `{`, `[`) start here? — gates open brackets;
 --- scalars replicate the check inline in build_step.
@@ -674,7 +674,7 @@ build_step := (tk, stack, val) ~> while { d: null } { (d) ~> { out: do {
         } else {
           if f.ph == "k0" || f.ph == "k" {
             match tk.v {
-              JStr(ks): { stack: [mk_frm("o", f.items, tk.v, ":"), ...rest], val: val, err: "", errp: 0 },
+              Json.jstr(ks): { stack: [mk_frm("o", f.items, tk.v, ":"), ...rest], val: val, err: "", errp: 0 },
               _: { stack: stack, val: val, err: "expected string key", errp: tk.p }
             }
           } else {
@@ -741,8 +741,8 @@ build_step := (tk, stack, val) ~> while { d: null } { (d) ~> { out: do {
   } } } } }
 } } }
 
---- The produced value: an `Ok` ctor wrapping the `Json`, or `Err` with
---- a `PErr(pos, msg)` — the error token's char offset, the input's
+--- The produced value: an `Result.ok` ctor wrapping the `Json`, or `Result.err` with
+--- a `PErr.perr(pos, msg)` — the error token's char offset, the input's
 --- length for unclosed containers, 0 for empty input.
 parse := s ~> while { d: null } { (d) ~> { out: do {
   ts := tokenize(s)
@@ -825,12 +825,12 @@ runState := (f, s0) ~> while { d: null } { (d) ~> { out: do {
 --- `parse_st` — the IO(State(pos))-carried variant of `parse`. The
 --- parser threads `pos` explicitly anyway (it is pure); the produced
 --- IO asserts the net effect: it read the state (`get`) and wrote the
---- final position (`put`). `runState` returns (Ok/Err, endpos).
+--- final position (`put`). `runState` returns (Result.ok/Result.err, endpos).
 --- The sig record is inlined — `mk_io`'s shared param meta pins the
 --- first call's record shape.
 parse_st := s ~> while { d: null } { (d) ~> { out: do {
   r := parse(s)
-  sig := { get: null, put: match r { Ok(v): char.length(s), Err(e): match e { PErr(p, m): do { ep := while { d: null } { (q) ~> { out: e } }; ep.pos }, _: 0 } }, result: r }
+  sig := { get: null, put: match r { Result.ok(v): char.length(s), Result.err(e): match e { PErr.perr(p, m): do { ep := while { d: null } { (q) ~> { out: e } }; ep.pos }, _: 0 } }, result: r }
   {"__former__": sym.seeded("type.io"), "indices": [sig]}
 } } }
 
@@ -914,35 +914,35 @@ smoke_all := [
   toStr(mk_jstr("hi")),
   toStr(mk_jarr([mk_jnum(1), mk_jstr("x"), mk_jnull])),
   toStr(mk_jobj([["a", mk_jnum(1)]])),
-  match parse("42") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("\"hi\"") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("[1,2]") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("{\"a\":1}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("true") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("{\"a\":[1,{\"b\":null}]}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("{\"a\":[1,2],\"b\":{\"c\":\"x\"}}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("\"\\u0041BC\"") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("  [ 1 , 2 ]  ") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("{}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("[]") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("{\"a\":{\"b\":{\"c\":[{}]}}}") { Ok(v): toStr(v), Err(e): str.concat("ERR", "") },
-  match parse("xyz") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("nul") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("truex") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1,2") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("}") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1}]") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1] 2") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("   ") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("[1 2]") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("[1,]") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
-  match parse("{,}") { Err(e): str.concat("e", ""), _: str.concat("o", "") },
-  match parse("\"abc") { Err(e): match e { PErr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("42") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("\"hi\"") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("[1,2]") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("{\"a\":1}") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("true") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("{\"a\":[1,{\"b\":null}]}") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("{\"a\":[1,2],\"b\":{\"c\":\"x\"}}") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("\"\\u0041BC\"") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("  [ 1 , 2 ]  ") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("{}") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("[]") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("{\"a\":{\"b\":{\"c\":[{}]}}}") { Result.ok(v): toStr(v), Result.err(e): str.concat("ERR", "") },
+  match parse("xyz") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("nul") { Result.err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("truex") { Result.err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1,2") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("}") { Result.err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1}]") { Result.err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1] 2") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("   ") { Result.err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("[1 2]") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("[1,]") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
+  match parse("{,}") { Result.err(e): str.concat("e", ""), _: str.concat("o", "") },
+  match parse("\"abc") { Result.err(e): match e { PErr.perr(p, m): do { em := while { d: null } { (q) ~> { out: e } }; em.msg }, _: str.concat("?", "") }, _: str.concat("?", "") },
   pretty(mk_jobj([["a", mk_jarr([mk_jnum(1)])]])),
   pretty(mk_jarr([])),
   pretty(mk_jobj([["x", mk_jbool(true)], ["y", mk_jnull]])),
-  match jfirst_scalar(JObj([["k", JArr([JNum(9)])]])) { JNum(n): n, _: 0 },
+  match jfirst_scalar(Json.jobj([["k", Json.jarr([Json.jnum(9)])]])) { Json.jnum(n): n, _: 0 },
   run_parse("[7]", 0),
   run_parse("[1,", 0),
   runState_c(demo_chain, uw_n(5)),
@@ -958,14 +958,14 @@ smoke_all := [
 -- so the suite asserts directly on `parse`/`toStr`/`pretty`.
 --
 -- Assertion helpers: `is_err`/`is_ok` discriminate the Result ctors;
--- `jstr_s` projects a JStr payload's string; `res_s` decodes a string
+-- `jstr_s` projects a Json.jstr payload's string; `res_s` decodes a string
 -- parse to its chars or "ERR:<msg>".
 -- ------------------------------------------------------------------------
 
-is_ok := r ~> match r { Ok(v): true, Err(e): false }
-is_err := r ~> match r { Ok(v): false, Err(e): true }
-jstr_s := j ~> match j { JStr(s): s, _: "" }
-res_s := r ~> match r { Ok(v): jstr_s(v), Err(e): do {
+is_ok := r ~> match r { Result.ok(v): true, Result.err(e): false }
+is_err := r ~> match r { Result.ok(v): false, Result.err(e): true }
+jstr_s := j ~> match j { Json.jstr(s): s, _: "" }
+res_s := r ~> match r { Result.ok(v): jstr_s(v), Result.err(e): do {
   --- `e`'s static type is `Result`'s `e` type param (opaque `Type`),
   --- so `e.msg` fails the checker; force it to `type.unknown` via a
   --- trivial `while` first — field access on unknown yields unknown.
@@ -1033,7 +1033,7 @@ test_st_del := assert toStr(mk_jstr(str.concat("a", str.concat(char.from_code_po
 
 --- escape round-trips: parse(toStr(x)) preserves the string
 test_rt_all := assert res_s(parse(toStr(mk_jstr(str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z"))))))) == str.concat("q\"w", str.concat(char.from_code_point(10), str.concat(char.from_code_point(1), "z")))
-test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Ok(v): toStr(v) == "{\"k\\\"y\":\"v\\nv\"}", Err(e): false }
+test_rt_obj := assert match parse(toStr(mk_jobj([["k\"y", mk_jstr("v\nv")]]))) { Result.ok(v): toStr(v) == "{\"k\\\"y\":\"v\\nv\"}", Result.err(e): false }
 
 --- number grammar: RFC 8259 rejects everything `class_num` over-collects
 test_num_ok_0 := assert is_ok(parse("0"))
