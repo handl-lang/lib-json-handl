@@ -187,9 +187,9 @@ jfirst_scalar : Json ~> Json := j ~> match j {
 --- the 27 unnamed control chars): `char.code_point` returns a Number
 --- the checker compares directly, so `cp == 34` / `cp < 32` typecheck
 --- even though other host results stay `type.unknown`.
---- `hex_dig` renders one hex digit (0–15 → '0'–'9'/'A'–'F') for the
+--- `hex_dig` renders one hex digit (0–15 → '0'–'9'/'a'–'f') for the
 --- `\u00XX` tail.
-hex_dig := d ~> if d < 10 { char.from_code_point(48 + d) } else { char.from_code_point(55 + d) }
+hex_dig := d ~> if d < 10 { char.from_code_point(48 + d) } else { char.from_code_point(87 + d) }
 
 --- High nibble of a value < 32 (0 or 1) — an arrow, not an inline `if`,
 --- because an `if`-expr producing Numbers inside a call arg trips the
